@@ -64,7 +64,7 @@ export const FLEET_PRESETS: FleetPreset[] = [
   {
     id: 'russian',
     name: 'Russian',
-    description: '7 ships, 20 cells — Popular 10×10 variant',
+    description: '10 ships, 20 cells — Popular 10×10 variant',
     ships: [
       { id: 'battleship', name: 'Battleship', size: 4 },
       { id: 'cruiser1', name: 'Cruiser', size: 3 },
@@ -72,7 +72,10 @@ export const FLEET_PRESETS: FleetPreset[] = [
       { id: 'destroyer1', name: 'Destroyer', size: 2 },
       { id: 'destroyer2', name: 'Destroyer', size: 2 },
       { id: 'destroyer3', name: 'Destroyer', size: 2 },
-      { id: 'patrol', name: 'Patrol Boat', size: 1 },
+      { id: 'patrol1', name: 'Patrol Boat', size: 1 },
+      { id: 'patrol2', name: 'Patrol Boat', size: 1 },
+      { id: 'patrol3', name: 'Patrol Boat', size: 1 },
+      { id: 'patrol4', name: 'Patrol Boat', size: 1 },
     ],
   },
   {
