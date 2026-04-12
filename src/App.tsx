@@ -36,7 +36,9 @@ function App() {
   const [orientation, setOrientation] = useState<Orientation>('horizontal');
   const [currentShipIndex, setCurrentShipIndex] = useState(0);
   const [isPlayerTurn, setIsPlayerTurn] = useState(true);
-  const [message, setMessage] = useState('Place your Carrier (5 cells)');
+  const [playerMessage, setPlayerMessage] = useState('');
+  const [aiMessage, setAiMessage] = useState('');
+  const [placementMessage, setPlacementMessage] = useState('Place your Carrier (5 cells)');
   const [winner, setWinner] = useState<'player' | 'ai' | null>(null);
   const [hoverCells, setHoverCells] = useState<Position[]>([]);
   const [hoverValid, setHoverValid] = useState(false);
@@ -69,16 +71,12 @@ function App() {
 
       const nextIndex = currentShipIndex + 1;
       if (nextIndex >= SHIP_CONFIGS.length) {
-        // All ships placed, start the game
-        const { board: aBoard, ships: aShips } = placeShipsRandomly();
-        setEnemyBoard(aBoard);
-        setEnemyShips(aShips);
-        setGamePhase('playing');
-        setMessage('Your turn! Click on the enemy board to attack.');
+        // All ships placed, let user review before starting
         setCurrentShipIndex(nextIndex);
+        setPlacementMessage('All ships placed! Review your layout, then click Start Game!');
       } else {
         setCurrentShipIndex(nextIndex);
-        setMessage(
+        setPlacementMessage(
           `Place your ${SHIP_CONFIGS[nextIndex].name} (${SHIP_CONFIGS[nextIndex].size} cells)`
         );
       }
@@ -115,18 +113,20 @@ function App() {
 
       if (result === 'sunk') {
         const sunkShip = enemyShips.find((s) => s.id === sunkShipId);
-        setMessage(`You sunk the enemy's ${sunkShip?.name}!`);
+        setPlayerMessage(`You sunk the enemy's ${sunkShip?.name}!`);
       } else if (result === 'hit') {
-        setMessage('Hit!');
+        setPlayerMessage('Hit!');
       } else {
-        setMessage('Miss!');
+        setPlayerMessage('Miss!');
       }
+      setAiMessage('');
 
       if (allShipsSunk(enemyShips)) {
         setGamePhase('gameOver');
         setWinner('player');
         setShowGameOverOverlay(true);
-        setMessage('You win! All enemy ships have been sunk!');
+        setPlayerMessage('You win! All enemy ships have been sunk!');
+        setAiMessage('');
         return;
       }
 
@@ -146,18 +146,19 @@ function App() {
 
         if (aiResult === 'sunk') {
           const sunkShip = playerShips.find((s) => s.id === aiSunkShipId);
-          setMessage(`AI sunk your ${sunkShip?.name}! Your turn.`);
+          setAiMessage(`AI sunk your ${sunkShip?.name}!`);
         } else if (aiResult === 'hit') {
-          setMessage('AI hit one of your ships! Your turn.');
+          setAiMessage('AI hit one of your ships!');
         } else {
-          setMessage('AI missed! Your turn.');
+          setAiMessage('AI missed!');
         }
 
         if (allShipsSunk(playerShips)) {
           setGamePhase('gameOver');
           setWinner('ai');
           setShowGameOverOverlay(true);
-          setMessage('Game Over! The AI sunk all your ships!');
+          setPlayerMessage('Game Over!');
+          setAiMessage('The AI sunk all your ships!');
           return;
         }
 
@@ -176,7 +177,9 @@ function App() {
     setOrientation('horizontal');
     setCurrentShipIndex(0);
     setIsPlayerTurn(true);
-    setMessage('Place your Carrier (5 cells)');
+    setPlayerMessage('');
+    setAiMessage('');
+    setPlacementMessage('Place your Carrier (5 cells)');
     setWinner(null);
     setHoverCells([]);
     setLastHit(null);
@@ -198,13 +201,46 @@ function App() {
     const { board, ships } = placeShipsRandomly();
     setPlayerBoard(board);
     setPlayerShips(ships);
+    setCurrentShipIndex(SHIP_CONFIGS.length);
+    setPlacementMessage('Ships placed randomly. Review your layout, then click Start Game!');
+    setHoverCells([]);
+  }, []);
 
+  const handleStartGame = useCallback(() => {
+    if (playerShips.length < SHIP_CONFIGS.length) return;
     const { board: aBoard, ships: aShips } = placeShipsRandomly();
     setEnemyBoard(aBoard);
     setEnemyShips(aShips);
-    setCurrentShipIndex(SHIP_CONFIGS.length);
     setGamePhase('playing');
-    setMessage('Your turn! Click on the enemy board to attack.');
+    setPlayerMessage('Your turn! Click on the enemy board to attack.');
+    setAiMessage('');
+  }, [playerShips]);
+
+  const handleUndoLastShip = useCallback(() => {
+    if (playerShips.length === 0) return;
+    const newShips = playerShips.slice(0, -1);
+    // Rebuild board from remaining ships
+    const board = createEmptyBoard();
+    for (const ship of newShips) {
+      for (const pos of ship.positions) {
+        board[pos.row][pos.col] = 'ship';
+      }
+    }
+    setPlayerBoard(board);
+    setPlayerShips(newShips);
+    setCurrentShipIndex(newShips.length);
+    setPlacementMessage(
+      `Place your ${SHIP_CONFIGS[newShips.length].name} (${SHIP_CONFIGS[newShips.length].size} cells)`
+    );
+    setHoverCells([]);
+  }, [playerShips]);
+
+  const handleResetPlacement = useCallback(() => {
+    setPlayerBoard(createEmptyBoard());
+    setPlayerShips([]);
+    setCurrentShipIndex(0);
+    setPlacementMessage('Place your Carrier (5 cells)');
+    setHoverCells([]);
   }, []);
 
   const renderCell = (
@@ -267,8 +303,8 @@ function App() {
     return (
       <button
         key={`${row}-${col}`}
-        className={`w-9 h-9 sm:w-10 sm:h-10 border ${borderClass} ${bgClass} ${cursorClass} 
-          flex items-center justify-center text-sm transition-all duration-150 
+        className={`w-6 h-6 sm:w-9 sm:h-9 md:w-10 md:h-10 border ${borderClass} ${bgClass} ${cursorClass} 
+          flex items-center justify-center text-xs sm:text-sm transition-all duration-150 
           ${isLastHit ? 'ring-2 ring-yellow-400 animate-pulse' : ''}`}
         onClick={onClick}
         onMouseEnter={
@@ -301,13 +337,13 @@ function App() {
     isEnemy: boolean,
     onCellClick?: (row: number, col: number) => void
   ) => (
-    <div className="inline-block">
+    <div className="inline-block overflow-x-auto max-w-full">
       {/* Column headers */}
-      <div className="flex ml-9 sm:ml-10">
+      <div className="flex ml-6 sm:ml-9 md:ml-10">
         {COL_LABELS.map((label) => (
           <div
             key={label}
-            className="w-9 h-6 sm:w-10 flex items-center justify-center text-xs font-bold text-cyan-300/80"
+            className="w-6 h-6 sm:w-9 md:w-10 flex items-center justify-center text-xs font-bold text-cyan-300/80"
           >
             {label}
           </div>
@@ -317,7 +353,7 @@ function App() {
       {board.map((row, rowIndex) => (
         <div key={rowIndex} className="flex">
           {/* Row number */}
-          <div className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center text-xs font-bold text-cyan-300/80">
+          <div className="w-6 h-6 sm:w-9 sm:h-9 md:w-10 md:h-10 flex items-center justify-center text-xs font-bold text-cyan-300/80">
             {rowIndex + 1}
           </div>
           {row.map((cell, colIndex) =>
@@ -392,33 +428,54 @@ function App() {
 
       {/* Message bar */}
       <div className="max-w-3xl mx-auto mb-4">
-        <div
-          className={`text-center py-2.5 px-4 rounded-lg font-semibold text-sm ${
-            winner === 'player'
-              ? 'bg-green-600/30 border border-green-500/50 text-green-300'
-              : winner === 'ai'
-                ? 'bg-red-600/30 border border-red-500/50 text-red-300'
-                : 'bg-slate-800/60 border border-slate-700/50 text-cyan-200'
-          }`}
-        >
-          {message}
-        </div>
+        {gamePhase === 'placement' ? (
+          <div className="text-center py-2.5 px-4 rounded-lg font-semibold text-sm bg-slate-800/60 border border-slate-700/50 text-cyan-200">
+            {placementMessage}
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            {playerMessage && (
+              <div
+                className={`flex-1 text-center py-2.5 px-4 rounded-lg font-semibold text-sm ${
+                  winner === 'player'
+                    ? 'bg-green-600/30 border border-green-500/50 text-green-300'
+                    : 'bg-blue-600/20 border border-blue-500/40 text-blue-200'
+                }`}
+              >
+                {playerMessage}
+              </div>
+            )}
+            {aiMessage && (
+              <div
+                className={`flex-1 text-center py-2.5 px-4 rounded-lg font-semibold text-sm ${
+                  winner === 'ai'
+                    ? 'bg-red-600/30 border border-red-500/50 text-red-300'
+                    : 'bg-amber-600/20 border border-amber-500/40 text-amber-200'
+                }`}
+              >
+                {aiMessage}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Placement controls */}
       {gamePhase === 'placement' && (
-        <div className="flex justify-center gap-3 mb-4">
-          <button
-            onClick={() =>
-              setOrientation((o) =>
-                o === 'horizontal' ? 'vertical' : 'horizontal'
-              )
-            }
-            className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-semibold 
-              transition-colors border border-cyan-500/50 shadow-lg shadow-cyan-900/30"
-          >
-            Orientation: {orientation === 'horizontal' ? '→ Horizontal' : '↓ Vertical'}
-          </button>
+        <div className="flex flex-wrap justify-center gap-3 mb-4">
+          {currentShipIndex < SHIP_CONFIGS.length && (
+            <button
+              onClick={() =>
+                setOrientation((o) =>
+                  o === 'horizontal' ? 'vertical' : 'horizontal'
+                )
+              }
+              className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-semibold 
+                transition-colors border border-cyan-500/50 shadow-lg shadow-cyan-900/30"
+            >
+              Orientation: {orientation === 'horizontal' ? '→ Horizontal' : '↓ Vertical'}
+            </button>
+          )}
           <button
             onClick={handleRandomPlacement}
             className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg text-sm font-semibold 
@@ -426,6 +483,33 @@ function App() {
           >
             Random Placement
           </button>
+          {playerShips.length > 0 && (
+            <>
+              <button
+                onClick={handleUndoLastShip}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-500 rounded-lg text-sm font-semibold
+                  transition-colors border border-amber-500/50 shadow-lg shadow-amber-900/30"
+              >
+                Undo Last Ship
+              </button>
+              <button
+                onClick={handleResetPlacement}
+                className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg text-sm font-semibold
+                  transition-colors border border-red-500/50 shadow-lg shadow-red-900/30"
+              >
+                Reset All
+              </button>
+            </>
+          )}
+          {currentShipIndex >= SHIP_CONFIGS.length && (
+            <button
+              onClick={handleStartGame}
+              className="px-6 py-2 bg-green-600 hover:bg-green-500 rounded-lg text-sm font-bold
+                transition-colors border border-green-500/50 shadow-lg shadow-green-900/30 animate-pulse"
+            >
+              Start Game
+            </button>
+          )}
         </div>
       )}
 
