@@ -1,5 +1,6 @@
 import {
   CellState,
+  Difficulty,
   Orientation,
   Position,
   Ship,
@@ -160,7 +161,134 @@ function getAdjacentCells(pos: Position): Position[] {
   );
 }
 
-export function getAIMove(aiState: AIState): Position {
+function getAIMoveEasy(aiState: AIState): Position {
+  const candidates: Position[] = [];
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      if (!aiState.triedPositions.has(posKey({ row: r, col: c }))) {
+        candidates.push({ row: r, col: c });
+      }
+    }
+  }
+  const choice = candidates[Math.floor(Math.random() * candidates.length)];
+  aiState.triedPositions.add(posKey(choice));
+  return choice;
+}
+
+function getAIMoveHard(aiState: AIState, board: CellState[][]): Position {
+  // In target mode, use hunt/target logic like medium
+  while (aiState.targetQueue.length > 0) {
+    const target = aiState.targetQueue.shift()!;
+    const key = posKey(target);
+    if (!aiState.triedPositions.has(key)) {
+      aiState.triedPositions.add(key);
+      return target;
+    }
+  }
+
+  // Hunt mode: probability density — count how many ship placements can cover each cell
+  aiState.mode = 'hunt';
+  const density: number[][] = Array.from({ length: BOARD_SIZE }, () =>
+    Array.from({ length: BOARD_SIZE }, () => 0)
+  );
+
+  // Find remaining ship sizes (ships not yet sunk based on board state)
+  const sunkSizes: number[] = [];
+  // Count sunk ships by finding contiguous sunk groups
+  const visited = new Set<string>();
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      if (board[r][c] === 'sunk' && !visited.has(posKey({ row: r, col: c }))) {
+        let size = 0;
+        // BFS to find sunk group
+        const queue: Position[] = [{ row: r, col: c }];
+        while (queue.length > 0) {
+          const p = queue.shift()!;
+          const pk = posKey(p);
+          if (visited.has(pk)) continue;
+          if (p.row < 0 || p.row >= BOARD_SIZE || p.col < 0 || p.col >= BOARD_SIZE) continue;
+          if (board[p.row][p.col] !== 'sunk') continue;
+          visited.add(pk);
+          size++;
+          queue.push({ row: p.row - 1, col: p.col });
+          queue.push({ row: p.row + 1, col: p.col });
+          queue.push({ row: p.row, col: p.col - 1 });
+          queue.push({ row: p.row, col: p.col + 1 });
+        }
+        sunkSizes.push(size);
+      }
+    }
+  }
+
+  const remainingSizes = SHIP_CONFIGS.map(s => s.size).slice();
+  for (const ss of sunkSizes) {
+    const idx = remainingSizes.indexOf(ss);
+    if (idx !== -1) remainingSizes.splice(idx, 1);
+  }
+
+  for (const shipSize of remainingSizes) {
+    for (let r = 0; r < BOARD_SIZE; r++) {
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        // Try horizontal
+        let canH = true;
+        for (let i = 0; i < shipSize && canH; i++) {
+          const nc = c + i;
+          if (nc >= BOARD_SIZE) { canH = false; break; }
+          const cell = board[r][nc];
+          if (cell === 'miss' || cell === 'sunk' || aiState.triedPositions.has(posKey({ row: r, col: nc })) && cell !== 'hit') {
+            canH = false;
+          }
+        }
+        if (canH) {
+          for (let i = 0; i < shipSize; i++) {
+            if (!aiState.triedPositions.has(posKey({ row: r, col: c + i }))) {
+              density[r][c + i]++;
+            }
+          }
+        }
+        // Try vertical
+        let canV = true;
+        for (let i = 0; i < shipSize && canV; i++) {
+          const nr = r + i;
+          if (nr >= BOARD_SIZE) { canV = false; break; }
+          const cell = board[nr][c];
+          if (cell === 'miss' || cell === 'sunk' || aiState.triedPositions.has(posKey({ row: nr, col: c })) && cell !== 'hit') {
+            canV = false;
+          }
+        }
+        if (canV) {
+          for (let i = 0; i < shipSize; i++) {
+            if (!aiState.triedPositions.has(posKey({ row: r + i, col: c }))) {
+              density[r + i][c]++;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Pick the untried cell with highest density
+  let bestScore = -1;
+  const bestCells: Position[] = [];
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      if (aiState.triedPositions.has(posKey({ row: r, col: c }))) continue;
+      if (density[r][c] > bestScore) {
+        bestScore = density[r][c];
+        bestCells.length = 0;
+        bestCells.push({ row: r, col: c });
+      } else if (density[r][c] === bestScore) {
+        bestCells.push({ row: r, col: c });
+      }
+    }
+  }
+
+  const choice = bestCells[Math.floor(Math.random() * bestCells.length)];
+  aiState.triedPositions.add(posKey(choice));
+  return choice;
+}
+
+function getAIMoveMedium(aiState: AIState): Position {
   // Target mode: attack cells adjacent to hits
   while (aiState.targetQueue.length > 0) {
     const target = aiState.targetQueue.shift()!;
@@ -195,6 +323,18 @@ export function getAIMove(aiState: AIState): Position {
   const choice = candidates[Math.floor(Math.random() * candidates.length)];
   aiState.triedPositions.add(posKey(choice));
   return choice;
+}
+
+export function getAIMove(aiState: AIState, difficulty: Difficulty = 'medium', board?: CellState[][]): Position {
+  switch (difficulty) {
+    case 'easy':
+      return getAIMoveEasy(aiState);
+    case 'hard':
+      return getAIMoveHard(aiState, board || createEmptyBoard());
+    case 'medium':
+    default:
+      return getAIMoveMedium(aiState);
+  }
 }
 
 export function updateAIAfterAttack(

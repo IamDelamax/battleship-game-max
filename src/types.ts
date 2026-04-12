@@ -2,7 +2,17 @@ export type CellState = 'empty' | 'ship' | 'hit' | 'miss' | 'sunk';
 
 export type Orientation = 'horizontal' | 'vertical';
 
-export type GamePhase = 'placement' | 'playing' | 'gameOver';
+export type GamePhase = 'setup' | 'placement' | 'playing' | 'gameOver';
+
+export type Difficulty = 'easy' | 'medium' | 'hard';
+
+export interface GameStats {
+  playerName: string;
+  wins: number;
+  losses: number;
+  totalShots: number;
+  totalHits: number;
+}
 
 export interface Position {
   row: number;

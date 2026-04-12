@@ -1,15 +1,26 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   CellState,
+  Difficulty,
   Orientation,
   Position,
   Ship,
   ShipConfig,
   GamePhase,
+  GameStats,
   SHIP_CONFIGS,
   BOARD_SIZE,
   COL_LABELS,
 } from './types';
+import {
+  setMuted,
+  playHitSound,
+  playMissSound,
+  playSunkSound,
+  playPlaceSound,
+  playStartSound,
+  playGameOverSound,
+} from './sounds';
 import {
   createEmptyBoard,
   canPlaceShip,
@@ -27,8 +38,53 @@ import {
 
 type AIStateType = ReturnType<typeof createAIState>;
 
+const STATS_KEY = 'battleship-stats';
+const DEFAULT_STATS: GameStats = { playerName: '', wins: 0, losses: 0, totalShots: 0, totalHits: 0 };
+
+function loadStats(): GameStats {
+  try {
+    const raw = localStorage.getItem(STATS_KEY);
+    if (raw) return { ...DEFAULT_STATS, ...JSON.parse(raw) };
+  } catch { /* ignore */ }
+  return { ...DEFAULT_STATS };
+}
+
+function saveStats(stats: GameStats) {
+  localStorage.setItem(STATS_KEY, JSON.stringify(stats));
+}
+
 function App() {
-  const [gamePhase, setGamePhase] = useState<GamePhase>('placement');
+  const [stats, setStats] = useState<GameStats>(loadStats);
+  const [nameInput, setNameInput] = useState(stats.playerName);
+  const [gamePhase, setGamePhase] = useState<GamePhase>(() => stats.playerName ? 'placement' : 'setup');
+  const shotCountRef = useRef({ shots: 0, hits: 0 });
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [difficulty, setDifficulty] = useState<Difficulty>('medium');
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [shotLog, setShotLog] = useState<Array<{ player: string; coord: string; result: string }>>([]);
+
+  // Timer effect
+  useEffect(() => {
+    if (gamePhase === 'playing') {
+      timerRef.current = setInterval(() => setElapsedTime(t => t + 1), 1000);
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current);
+    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [gamePhase]);
+
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const toggleSound = useCallback(() => {
+    const next = !soundEnabled;
+    setSoundEnabled(next);
+    setMuted(!next);
+  }, [soundEnabled]);
   const [playerBoard, setPlayerBoard] = useState<CellState[][]>(createEmptyBoard());
   const [enemyBoard, setEnemyBoard] = useState<CellState[][]>(createEmptyBoard());
   const [playerShips, setPlayerShips] = useState<Ship[]>([]);
@@ -64,6 +120,7 @@ function App() {
         orientation
       );
       setPlayerBoard(newBoard);
+      playPlaceSound();
 
       const newShip = createShipFromConfig(currentShipConfig, positions);
       const updatedShips = [...playerShips, newShip];
@@ -114,11 +171,21 @@ function App() {
       if (result === 'sunk') {
         const sunkShip = enemyShips.find((s) => s.id === sunkShipId);
         setPlayerMessage(`You sunk the enemy's ${sunkShip?.name}!`);
+        playSunkSound();
+        shotCountRef.current.shots++;
+        shotCountRef.current.hits++;
       } else if (result === 'hit') {
         setPlayerMessage('Hit!');
+        playHitSound();
+        shotCountRef.current.shots++;
+        shotCountRef.current.hits++;
       } else {
         setPlayerMessage('Miss!');
+        playMissSound();
+        shotCountRef.current.shots++;
       }
+      const coordLabel = `${COL_LABELS[col]}${row + 1}`;
+      setShotLog(prev => [...prev, { player: 'You', coord: coordLabel, result }]);
       setAiMessage('');
 
       if (allShipsSunk(enemyShips)) {
@@ -127,6 +194,17 @@ function App() {
         setShowGameOverOverlay(true);
         setPlayerMessage('You win! All enemy ships have been sunk!');
         setAiMessage('');
+        playGameOverSound(true);
+        setStats(prev => {
+          const updated = {
+            ...prev,
+            wins: prev.wins + 1,
+            totalShots: prev.totalShots + shotCountRef.current.shots,
+            totalHits: prev.totalHits + shotCountRef.current.hits,
+          };
+          saveStats(updated);
+          return updated;
+        });
         return;
       }
 
@@ -134,7 +212,7 @@ function App() {
 
       // AI turn after a delay
       setTimeout(() => {
-        const aiMove = getAIMove(aiStateRef.current);
+        const aiMove = getAIMove(aiStateRef.current, difficulty, playerBoard);
         const {
           newBoard: aiNewBoard,
           result: aiResult,
@@ -144,14 +222,18 @@ function App() {
         updateAIAfterAttack(aiStateRef.current, aiMove, aiResult);
         setPlayerBoard(aiNewBoard);
 
+        const aiCoordLabel = `${COL_LABELS[aiMove.col]}${aiMove.row + 1}`;
         if (aiResult === 'sunk') {
           const sunkShip = playerShips.find((s) => s.id === aiSunkShipId);
           setAiMessage(`AI sunk your ${sunkShip?.name}!`);
+          playSunkSound();
         } else if (aiResult === 'hit') {
           setAiMessage('AI hit one of your ships!');
+          playHitSound();
         } else {
           setAiMessage('AI missed!');
         }
+        setShotLog(prev => [...prev, { player: 'AI', coord: aiCoordLabel, result: aiResult }]);
 
         if (allShipsSunk(playerShips)) {
           setGamePhase('gameOver');
@@ -159,16 +241,38 @@ function App() {
           setShowGameOverOverlay(true);
           setPlayerMessage('Game Over!');
           setAiMessage('The AI sunk all your ships!');
+          playGameOverSound(false);
+          setStats(prev => {
+            const updated = {
+              ...prev,
+              losses: prev.losses + 1,
+              totalShots: prev.totalShots + shotCountRef.current.shots,
+              totalHits: prev.totalHits + shotCountRef.current.hits,
+            };
+            saveStats(updated);
+            return updated;
+          });
           return;
         }
 
         setIsPlayerTurn(true);
       }, 600);
     },
-    [gamePhase, isPlayerTurn, enemyBoard, enemyShips, playerBoard, playerShips]
+    [gamePhase, isPlayerTurn, enemyBoard, enemyShips, playerBoard, playerShips, difficulty]
   );
 
+  const handleSetupComplete = useCallback(() => {
+    const trimmed = nameInput.trim() || 'Admiral';
+    const updated = { ...stats, playerName: trimmed };
+    setStats(updated);
+    saveStats(updated);
+    setGamePhase('placement');
+  }, [nameInput, stats]);
+
   const handlePlayAgain = useCallback(() => {
+    shotCountRef.current = { shots: 0, hits: 0 };
+    setElapsedTime(0);
+    setShotLog([]);
     setGamePhase('placement');
     setPlayerBoard(createEmptyBoard());
     setEnemyBoard(createEmptyBoard());
@@ -214,6 +318,9 @@ function App() {
     setGamePhase('playing');
     setPlayerMessage('Your turn! Click on the enemy board to attack.');
     setAiMessage('');
+    setElapsedTime(0);
+    setShotLog([]);
+    playStartSound();
   }, [playerShips]);
 
   const handleUndoLastShip = useCallback(() => {
@@ -408,15 +515,85 @@ function App() {
     </div>
   );
 
+  const accuracy = stats.totalShots > 0 ? Math.round((stats.totalHits / stats.totalShots) * 100) : 0;
+  const totalGames = stats.wins + stats.losses;
+
+  if (gamePhase === 'setup') {
+    return (
+      <div className="min-h-screen text-white flex flex-col items-center justify-center p-4">
+        <h1 className="text-4xl sm:text-5xl font-black tracking-tight mb-2">
+          <span className="text-cyan-400">BATTLE</span>
+          <span className="text-slate-300">SHIP</span>
+        </h1>
+        <p className="text-slate-400 text-sm mb-8">Naval Combat Strategy Game</p>
+        <div className="bg-slate-800/80 rounded-2xl p-8 max-w-sm w-full border border-slate-600 shadow-2xl">
+          <label className="block text-sm font-semibold text-cyan-300 mb-2 uppercase tracking-wider">
+            Commander Name
+          </label>
+          <input
+            type="text"
+            value={nameInput}
+            onChange={(e) => setNameInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSetupComplete()}
+            placeholder="Enter your name..."
+            className="w-full px-4 py-3 bg-slate-700 border border-slate-500 rounded-lg text-white placeholder-slate-400
+              focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 text-lg"
+            autoFocus
+          />
+          <button
+            onClick={handleSetupComplete}
+            className="w-full mt-4 px-6 py-3 bg-cyan-600 hover:bg-cyan-500 rounded-xl text-lg font-bold
+              transition-all border border-cyan-400/50 shadow-lg shadow-cyan-900/40
+              hover:shadow-cyan-800/60 active:scale-95"
+          >
+            Set Sail!
+          </button>
+          {totalGames > 0 && (
+            <div className="mt-6 pt-4 border-t border-slate-600">
+              <h3 className="text-sm font-bold text-slate-300 mb-2">Previous Record</h3>
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div>
+                  <div className="text-green-400 text-xl font-black">{stats.wins}</div>
+                  <div className="text-xs text-slate-400">Wins</div>
+                </div>
+                <div>
+                  <div className="text-red-400 text-xl font-black">{stats.losses}</div>
+                  <div className="text-xs text-slate-400">Losses</div>
+                </div>
+                <div>
+                  <div className="text-cyan-400 text-xl font-black">{accuracy}%</div>
+                  <div className="text-xs text-slate-400">Accuracy</div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        <footer className="mt-12 text-center text-slate-500 text-xs">
+          Created by Max Sapo solely for the purpose of the Cognition Labs interview demo
+        </footer>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen text-white p-4 sm:p-6">
       {/* Header */}
       <header className="text-center mb-6 relative">
+        <div className="absolute left-0 top-1/2 -translate-y-1/2 flex gap-2">
+          <button
+            onClick={toggleSound}
+            className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-semibold
+              transition-colors border border-slate-600/50 text-slate-300 hover:text-white"
+            title={soundEnabled ? 'Mute sounds' : 'Unmute sounds'}
+          >
+            {soundEnabled ? '🔊' : '🔇'}
+          </button>
+        </div>
         <h1 className="text-4xl sm:text-5xl font-black tracking-tight">
           <span className="text-cyan-400">BATTLE</span>
           <span className="text-slate-300">SHIP</span>
         </h1>
-        <p className="text-slate-400 text-sm mt-1">Naval Combat Strategy Game</p>
+        <p className="text-slate-400 text-sm mt-1">Commander {stats.playerName}</p>
         <button
           onClick={handleNewGame}
           className="absolute right-0 top-1/2 -translate-y-1/2 px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-semibold
@@ -459,6 +636,44 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* Difficulty selector - only during placement */}
+      {gamePhase === 'placement' && (
+        <div className="flex justify-center gap-2 mb-4">
+          <span className="text-xs text-slate-400 self-center mr-1">Difficulty:</span>
+          {(['easy', 'medium', 'hard'] as Difficulty[]).map((d) => (
+            <button
+              key={d}
+              onClick={() => setDifficulty(d)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
+                difficulty === d
+                  ? d === 'easy'
+                    ? 'bg-green-600 border-green-500 text-white'
+                    : d === 'medium'
+                      ? 'bg-amber-600 border-amber-500 text-white'
+                      : 'bg-red-600 border-red-500 text-white'
+                  : 'bg-slate-700 border-slate-600/50 text-slate-400 hover:text-white hover:bg-slate-600'
+              }`}
+            >
+              {d.charAt(0).toUpperCase() + d.slice(1)}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Timer display during game */}
+      {(gamePhase === 'playing' || gamePhase === 'gameOver') && (
+        <div className="text-center mb-2">
+          <span className="text-xs text-slate-400">
+            ⏱ {formatTime(elapsedTime)}
+            {gamePhase === 'playing' && (
+              <span className="ml-3 text-slate-500">
+                {difficulty.charAt(0).toUpperCase() + difficulty.slice(1)} AI
+              </span>
+            )}
+          </span>
+        </div>
+      )}
 
       {/* Placement controls */}
       {gamePhase === 'placement' && (
@@ -552,18 +767,46 @@ function App() {
         )}
       </div>
 
-      {/* Turn indicator */}
-      {gamePhase === 'playing' && (
-        <div className="text-center mt-4">
-          <span
-            className={`inline-block px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider ${
-              isPlayerTurn
-                ? 'bg-green-600/30 text-green-300 border border-green-500/40'
-                : 'bg-amber-600/30 text-amber-300 border border-amber-500/40 animate-pulse'
-            }`}
-          >
-            {isPlayerTurn ? 'Your Turn' : 'AI Thinking...'}
-          </span>
+      {/* Turn indicator + Shot log */}
+      {(gamePhase === 'playing' || gamePhase === 'gameOver') && (
+        <div className="max-w-3xl mx-auto mt-4 flex flex-col items-center gap-3">
+          {gamePhase === 'playing' && (
+            <span
+              className={`inline-block px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider ${
+                isPlayerTurn
+                  ? 'bg-green-600/30 text-green-300 border border-green-500/40'
+                  : 'bg-amber-600/30 text-amber-300 border border-amber-500/40 animate-pulse'
+              }`}
+            >
+              {isPlayerTurn ? 'Your Turn' : 'AI Thinking...'}
+            </span>
+          )}
+
+          {/* Shot history log */}
+          {shotLog.length > 0 && (
+            <details className="w-full max-w-md">
+              <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-300 text-center">
+                Shot Log ({shotLog.length} moves)
+              </summary>
+              <div className="mt-2 max-h-32 overflow-y-auto bg-slate-800/60 rounded-lg border border-slate-700/50 p-2">
+                {shotLog.slice().reverse().map((entry, i) => (
+                  <div key={i} className="flex justify-between text-xs py-0.5 px-2">
+                    <span className={entry.player === 'You' ? 'text-blue-300' : 'text-amber-300'}>
+                      {entry.player}
+                    </span>
+                    <span className="text-slate-400">{entry.coord}</span>
+                    <span className={
+                      entry.result === 'sunk' ? 'text-red-400 font-bold'
+                        : entry.result === 'hit' ? 'text-orange-400'
+                          : 'text-slate-500'
+                    }>
+                      {entry.result.toUpperCase()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       )}
 
@@ -648,6 +891,21 @@ function App() {
         </div>
       )}
 
+      {/* Stats bar */}
+      {totalGames > 0 && (
+        <div className="max-w-3xl mx-auto mt-4 flex justify-center gap-6">
+          <span className="text-xs text-slate-400">
+            <span className="text-green-400 font-bold">{stats.wins}W</span> / <span className="text-red-400 font-bold">{stats.losses}L</span>
+          </span>
+          <span className="text-xs text-slate-400">
+            Accuracy: <span className="text-cyan-400 font-bold">{accuracy}%</span>
+          </span>
+          <span className="text-xs text-slate-400">
+            Games: <span className="text-white font-bold">{totalGames}</span>
+          </span>
+        </div>
+      )}
+
       {/* Legend */}
       <div className="flex justify-center gap-4 mt-6 flex-wrap">
         {[
@@ -665,6 +923,11 @@ function App() {
           </div>
         ))}
       </div>
+
+      {/* Footer */}
+      <footer className="text-center mt-8 text-slate-500 text-xs">
+        Created by Max Sapo solely for the purpose of the Cognition Labs interview demo
+      </footer>
     </div>
   );
 }
