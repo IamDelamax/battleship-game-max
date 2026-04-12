@@ -106,9 +106,60 @@ function App() {
   const [showGameOverOverlay, setShowGameOverOverlay] = useState(false);
   const [revealEnemyShips, setRevealEnemyShips] = useState(false);
   const [selectedFleet, setSelectedFleet] = useState<FleetPreset>(FLEET_PRESETS[0]);
+  const [coordInput, setCoordInput] = useState('');
+  const [coordError, setCoordError] = useState('');
+  const coordInputRef = useRef<HTMLInputElement>(null);
+  const [animatingCells, setAnimatingCells] = useState<Map<string, string>>(new Map());
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const activeShipConfigs = selectedFleet.ships;
   const currentShipConfig: ShipConfig | undefined = activeShipConfigs[currentShipIndex];
+
+  // Parse coordinate string like "B5" into row/col
+  const parseCoord = useCallback((input: string): { row: number; col: number } | null => {
+    const trimmed = input.trim().toUpperCase();
+    if (trimmed.length < 2 || trimmed.length > 3) return null;
+    const colChar = trimmed[0];
+    const rowStr = trimmed.slice(1);
+    const colIndex = COL_LABELS.indexOf(colChar);
+    if (colIndex === -1) return null;
+    const rowNum = parseInt(rowStr, 10);
+    if (isNaN(rowNum) || rowNum < 1 || rowNum > BOARD_SIZE) return null;
+    return { row: rowNum - 1, col: colIndex };
+  }, []);
+
+  // Trigger cell animation
+  const triggerCellAnim = useCallback((row: number, col: number, type: string) => {
+    const key = `${row},${col}`;
+    setAnimatingCells(prev => {
+      const next = new Map(prev);
+      next.set(key, type);
+      return next;
+    });
+    setTimeout(() => {
+      setAnimatingCells(prev => {
+        const next = new Map(prev);
+        next.delete(key);
+        return next;
+      });
+    }, 500);
+  }, []);
+
+  // Fullscreen toggle
+  const toggleFullscreen = useCallback(() => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  }, []);
+
+  // Listen for fullscreen changes
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
 
   const handlePlacementClick = useCallback(
     (row: number, col: number) => {
@@ -125,6 +176,10 @@ function App() {
       );
       setPlayerBoard(newBoard);
       playPlaceSound();
+      // Animate placed cells
+      for (const pos of positions) {
+        triggerCellAnim(pos.row, pos.col, 'place');
+      }
 
       const newShip = createShipFromConfig(currentShipConfig, positions);
       const updatedShips = [...playerShips, newShip];
@@ -143,7 +198,7 @@ function App() {
       }
       setHoverCells([]);
     },
-    [playerBoard, playerShips, currentShipIndex, orientation, currentShipConfig, activeShipConfigs]
+    [playerBoard, playerShips, currentShipIndex, orientation, currentShipConfig, activeShipConfigs, triggerCellAnim]
   );
 
   const handlePlacementHover = useCallback(
@@ -178,15 +233,23 @@ function App() {
         playSunkSound();
         shotCountRef.current.shots++;
         shotCountRef.current.hits++;
+        // Animate all sunk ship cells
+        if (sunkShip) {
+          for (const pos of sunkShip.positions) {
+            triggerCellAnim(pos.row, pos.col, 'sunk');
+          }
+        }
       } else if (result === 'hit') {
         setPlayerMessage('Hit!');
         playHitSound();
         shotCountRef.current.shots++;
         shotCountRef.current.hits++;
+        triggerCellAnim(row, col, 'hit');
       } else {
         setPlayerMessage('Miss!');
         playMissSound();
         shotCountRef.current.shots++;
+        triggerCellAnim(row, col, 'miss');
       }
       const coordLabel = `${COL_LABELS[col]}${row + 1}`;
       setShotLog(prev => [...prev, { player: 'You', coord: coordLabel, result }]);
@@ -231,11 +294,18 @@ function App() {
           const sunkShip = playerShips.find((s) => s.id === aiSunkShipId);
           setAiMessage(`AI sunk your ${sunkShip?.name}!`);
           playSunkSound();
+          if (sunkShip) {
+            for (const pos of sunkShip.positions) {
+              triggerCellAnim(pos.row, pos.col, 'sunk');
+            }
+          }
         } else if (aiResult === 'hit') {
           setAiMessage('AI hit one of your ships!');
           playHitSound();
+          triggerCellAnim(aiMove.row, aiMove.col, 'hit');
         } else {
           setAiMessage('AI missed!');
+          triggerCellAnim(aiMove.row, aiMove.col, 'miss');
         }
         setShotLog(prev => [...prev, { player: 'AI', coord: aiCoordLabel, result: aiResult }]);
 
@@ -262,8 +332,21 @@ function App() {
         setIsPlayerTurn(true);
       }, 600);
     },
-    [gamePhase, isPlayerTurn, enemyBoard, enemyShips, playerBoard, playerShips, difficulty, activeShipConfigs]
+    [gamePhase, isPlayerTurn, enemyBoard, enemyShips, playerBoard, playerShips, difficulty, activeShipConfigs, triggerCellAnim]
   );
+
+  // Handle coordinate input fire
+  const handleCoordFire = useCallback(() => {
+    if (!coordInput.trim()) return;
+    const parsed = parseCoord(coordInput);
+    if (!parsed) {
+      setCoordError('Invalid coordinate (e.g. B5)');
+      return;
+    }
+    setCoordError('');
+    setCoordInput('');
+    handleAttack(parsed.row, parsed.col);
+  }, [coordInput, parseCoord, handleAttack]);
 
   const handleSetupComplete = useCallback(() => {
     const trimmed = nameInput.trim() || 'Admiral';
@@ -298,6 +381,9 @@ function App() {
     setShowNewGameConfirm(false);
     setShowGameOverOverlay(false);
     setRevealEnemyShips(false);
+    setCoordInput('');
+    setCoordError('');
+    setAnimatingCells(new Map());
     aiStateRef.current = createAIState();
   }, [selectedFleet]);
 
@@ -358,6 +444,46 @@ function App() {
     setHoverCells([]);
   }, [activeShipConfigs]);
 
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Don't intercept when typing in input fields
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+      switch (e.key.toLowerCase()) {
+        case 'r':
+          if (gamePhase === 'placement' && currentShipIndex < activeShipConfigs.length) {
+            e.preventDefault();
+            setOrientation(o => o === 'horizontal' ? 'vertical' : 'horizontal');
+          }
+          break;
+        case 'n':
+          e.preventDefault();
+          handleNewGame();
+          break;
+        case 'u':
+          if (gamePhase === 'placement' && playerShips.length > 0) {
+            e.preventDefault();
+            handleUndoLastShip();
+          }
+          break;
+        case 'f':
+          e.preventDefault();
+          toggleFullscreen();
+          break;
+        case '/':
+          if (gamePhase === 'playing' && isPlayerTurn) {
+            e.preventDefault();
+            coordInputRef.current?.focus();
+          }
+          break;
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [gamePhase, currentShipIndex, activeShipConfigs.length, playerShips.length, isPlayerTurn, handleNewGame, handleUndoLastShip, toggleFullscreen]);
+
   const renderCell = (
     cell: CellState,
     row: number,
@@ -415,12 +541,22 @@ function App() {
       cursorClass = 'cursor-pointer';
     }
 
+    // Check for animation class
+    const cellKey = `${row},${col}`;
+    const animType = animatingCells.get(cellKey);
+    let animClass = '';
+    if (animType === 'hit') animClass = 'cell-hit-anim';
+    else if (animType === 'miss') animClass = 'cell-miss-anim';
+    else if (animType === 'sunk') animClass = 'cell-sunk-anim';
+    else if (animType === 'place') animClass = 'cell-place-anim';
+
     return (
       <button
         key={`${row}-${col}`}
         className={`w-6 h-6 sm:w-9 sm:h-9 md:w-10 md:h-10 border ${borderClass} ${bgClass} ${cursorClass} 
           flex items-center justify-center text-xs sm:text-sm transition-all duration-150 
-          ${isLastHit ? 'ring-2 ring-yellow-400 animate-pulse' : ''}`}
+          ${isLastHit ? 'ring-2 ring-yellow-400 animate-pulse' : ''}
+          ${animClass}`}
         onClick={onClick}
         onMouseEnter={
           gamePhase === 'placement' && !isEnemy
@@ -592,9 +728,17 @@ function App() {
             onClick={toggleSound}
             className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-semibold
               transition-colors border border-slate-600/50 text-slate-300 hover:text-white"
-            title={soundEnabled ? 'Mute sounds' : 'Unmute sounds'}
+            title={soundEnabled ? 'Mute sounds (M)' : 'Unmute sounds (M)'}
           >
             {soundEnabled ? '🔊' : '🔇'}
+          </button>
+          <button
+            onClick={toggleFullscreen}
+            className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-semibold
+              transition-colors border border-slate-600/50 text-slate-300 hover:text-white"
+            title={isFullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)'}
+          >
+            {isFullscreen ? '⊡' : '⛶'}
           </button>
         </div>
         <h1 className="text-4xl sm:text-5xl font-black tracking-tight">
@@ -809,19 +953,47 @@ function App() {
         )}
       </div>
 
-      {/* Turn indicator + Shot log */}
+      {/* Turn indicator + Coordinate input + Shot log */}
       {(gamePhase === 'playing' || gamePhase === 'gameOver') && (
         <div className="max-w-3xl mx-auto mt-4 flex flex-col items-center gap-3">
           {gamePhase === 'playing' && (
-            <span
-              className={`inline-block px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider ${
-                isPlayerTurn
-                  ? 'bg-green-600/30 text-green-300 border border-green-500/40'
-                  : 'bg-amber-600/30 text-amber-300 border border-amber-500/40 animate-pulse'
-              }`}
-            >
-              {isPlayerTurn ? 'Your Turn' : 'AI Thinking...'}
-            </span>
+            <div className="flex flex-col items-center gap-2">
+              <span
+                className={`inline-block px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider ${
+                  isPlayerTurn
+                    ? 'bg-green-600/30 text-green-300 border border-green-500/40'
+                    : 'bg-amber-600/30 text-amber-300 border border-amber-500/40 animate-pulse'
+                }`}
+              >
+                {isPlayerTurn ? 'Your Turn' : 'AI Thinking...'}
+              </span>
+              {/* Coordinate targeting input */}
+              {isPlayerTurn && (
+                <div className="flex items-center gap-2">
+                  <input
+                    ref={coordInputRef}
+                    type="text"
+                    value={coordInput}
+                    onChange={(e) => { setCoordInput(e.target.value.toUpperCase()); setCoordError(''); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleCoordFire(); }}
+                    placeholder="B5"
+                    maxLength={3}
+                    className="coord-input w-16 px-2 py-1.5 bg-slate-700 border border-slate-500 rounded-lg text-white text-center text-sm
+                      focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400"
+                    title='Type coordinate and press Enter to fire (press "/" to focus)'
+                  />
+                  <button
+                    onClick={handleCoordFire}
+                    disabled={!coordInput.trim()}
+                    className="px-3 py-1.5 bg-red-600 hover:bg-red-500 rounded-lg text-xs font-bold
+                      transition-colors border border-red-500/50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Fire!
+                  </button>
+                  {coordError && <span className="text-red-400 text-xs">{coordError}</span>}
+                </div>
+              )}
+            </div>
           )}
 
           {/* Shot history log */}
@@ -964,6 +1136,21 @@ function App() {
             <span className="text-xs text-slate-400">{item.label}</span>
           </div>
         ))}
+      </div>
+
+      {/* Keyboard shortcuts hint */}
+      <div className="flex justify-center mt-3">
+        <details className="text-center">
+          <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-400">Keyboard Shortcuts</summary>
+          <div className="mt-2 bg-slate-800/60 rounded-lg border border-slate-700/50 p-3 text-xs text-slate-400 grid grid-cols-2 gap-x-6 gap-y-1">
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">R</kbd> Rotate ship</span>
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">N</kbd> New game</span>
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">U</kbd> Undo ship</span>
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">F</kbd> Fullscreen</span>
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">/</kbd> Focus target input</span>
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">Enter</kbd> Fire at coordinate</span>
+          </div>
+        </details>
       </div>
 
       {/* Footer */}
