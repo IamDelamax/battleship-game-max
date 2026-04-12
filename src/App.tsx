@@ -1,15 +1,27 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   CellState,
+  Difficulty,
   Orientation,
   Position,
   Ship,
   ShipConfig,
   GamePhase,
-  SHIP_CONFIGS,
+  GameStats,
   BOARD_SIZE,
   COL_LABELS,
+  FleetPreset,
+  FLEET_PRESETS,
 } from './types';
+import {
+  setMuted,
+  playHitSound,
+  playMissSound,
+  playSunkSound,
+  playPlaceSound,
+  playStartSound,
+  playGameOverSound,
+} from './sounds';
 import {
   createEmptyBoard,
   canPlaceShip,
@@ -27,8 +39,53 @@ import {
 
 type AIStateType = ReturnType<typeof createAIState>;
 
+const STATS_KEY = 'battleship-stats';
+const DEFAULT_STATS: GameStats = { playerName: '', wins: 0, losses: 0, totalShots: 0, totalHits: 0 };
+
+function loadStats(): GameStats {
+  try {
+    const raw = localStorage.getItem(STATS_KEY);
+    if (raw) return { ...DEFAULT_STATS, ...JSON.parse(raw) };
+  } catch { /* ignore */ }
+  return { ...DEFAULT_STATS };
+}
+
+function saveStats(stats: GameStats) {
+  localStorage.setItem(STATS_KEY, JSON.stringify(stats));
+}
+
 function App() {
-  const [gamePhase, setGamePhase] = useState<GamePhase>('placement');
+  const [stats, setStats] = useState<GameStats>(loadStats);
+  const [nameInput, setNameInput] = useState(stats.playerName);
+  const [gamePhase, setGamePhase] = useState<GamePhase>(() => stats.playerName ? 'placement' : 'setup');
+  const shotCountRef = useRef({ shots: 0, hits: 0 });
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [difficulty, setDifficulty] = useState<Difficulty>('medium');
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [shotLog, setShotLog] = useState<Array<{ player: string; coord: string; result: string }>>([]);
+
+  // Timer effect
+  useEffect(() => {
+    if (gamePhase === 'playing') {
+      timerRef.current = setInterval(() => setElapsedTime(t => t + 1), 1000);
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current);
+    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [gamePhase]);
+
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const toggleSound = useCallback(() => {
+    const next = !soundEnabled;
+    setSoundEnabled(next);
+    setMuted(!next);
+  }, [soundEnabled]);
   const [playerBoard, setPlayerBoard] = useState<CellState[][]>(createEmptyBoard());
   const [enemyBoard, setEnemyBoard] = useState<CellState[][]>(createEmptyBoard());
   const [playerShips, setPlayerShips] = useState<Ship[]>([]);
@@ -36,14 +93,73 @@ function App() {
   const [orientation, setOrientation] = useState<Orientation>('horizontal');
   const [currentShipIndex, setCurrentShipIndex] = useState(0);
   const [isPlayerTurn, setIsPlayerTurn] = useState(true);
-  const [message, setMessage] = useState('Place your Carrier (5 cells)');
+  const [playerMessage, setPlayerMessage] = useState('');
+  const [aiMessage, setAiMessage] = useState('');
+  const [placementMessage, setPlacementMessage] = useState('Place your Carrier (5 cells)');
   const [winner, setWinner] = useState<'player' | 'ai' | null>(null);
   const [hoverCells, setHoverCells] = useState<Position[]>([]);
   const [hoverValid, setHoverValid] = useState(false);
   const [lastHit, setLastHit] = useState<Position | null>(null);
   const aiStateRef = useRef<AIStateType>(createAIState());
+  const aiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [showNewGameConfirm, setShowNewGameConfirm] = useState(false);
+  const [showGameOverOverlay, setShowGameOverOverlay] = useState(false);
+  const [revealEnemyShips, setRevealEnemyShips] = useState(false);
+  const [selectedFleet, setSelectedFleet] = useState<FleetPreset>(FLEET_PRESETS[0]);
+  const [coordInput, setCoordInput] = useState('');
+  const [coordError, setCoordError] = useState('');
+  const coordInputRef = useRef<HTMLInputElement>(null);
+  const [animatingCells, setAnimatingCells] = useState<Map<string, string>>(new Map());
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
-  const currentShipConfig: ShipConfig | undefined = SHIP_CONFIGS[currentShipIndex];
+  const activeShipConfigs = selectedFleet.ships;
+  const currentShipConfig: ShipConfig | undefined = activeShipConfigs[currentShipIndex];
+
+  // Parse coordinate string like "B5" into row/col
+  const parseCoord = useCallback((input: string): { row: number; col: number } | null => {
+    const trimmed = input.trim().toUpperCase();
+    if (trimmed.length < 2 || trimmed.length > 3) return null;
+    const colChar = trimmed[0];
+    const rowStr = trimmed.slice(1);
+    const colIndex = COL_LABELS.indexOf(colChar);
+    if (colIndex === -1) return null;
+    const rowNum = parseInt(rowStr, 10);
+    if (isNaN(rowNum) || rowNum < 1 || rowNum > BOARD_SIZE) return null;
+    return { row: rowNum - 1, col: colIndex };
+  }, []);
+
+  // Trigger cell animation
+  const triggerCellAnim = useCallback((row: number, col: number, type: string) => {
+    const key = `${row},${col}`;
+    setAnimatingCells(prev => {
+      const next = new Map(prev);
+      next.set(key, type);
+      return next;
+    });
+    setTimeout(() => {
+      setAnimatingCells(prev => {
+        const next = new Map(prev);
+        next.delete(key);
+        return next;
+      });
+    }, 500);
+  }, []);
+
+  // Fullscreen toggle
+  const toggleFullscreen = useCallback(() => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  }, []);
+
+  // Listen for fullscreen changes
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
 
   const handlePlacementClick = useCallback(
     (row: number, col: number) => {
@@ -59,29 +175,30 @@ function App() {
         orientation
       );
       setPlayerBoard(newBoard);
+      playPlaceSound();
+      // Animate placed cells
+      for (const pos of positions) {
+        triggerCellAnim(pos.row, pos.col, 'place');
+      }
 
       const newShip = createShipFromConfig(currentShipConfig, positions);
       const updatedShips = [...playerShips, newShip];
       setPlayerShips(updatedShips);
 
       const nextIndex = currentShipIndex + 1;
-      if (nextIndex >= SHIP_CONFIGS.length) {
-        // All ships placed, start the game
-        const { board: aBoard, ships: aShips } = placeShipsRandomly();
-        setEnemyBoard(aBoard);
-        setEnemyShips(aShips);
-        setGamePhase('playing');
-        setMessage('Your turn! Click on the enemy board to attack.');
+      if (nextIndex >= activeShipConfigs.length) {
+        // All ships placed, let user review before starting
         setCurrentShipIndex(nextIndex);
+        setPlacementMessage('All ships placed! Review your layout, then click Start Game!');
       } else {
         setCurrentShipIndex(nextIndex);
-        setMessage(
-          `Place your ${SHIP_CONFIGS[nextIndex].name} (${SHIP_CONFIGS[nextIndex].size} cells)`
+        setPlacementMessage(
+          `Place your ${activeShipConfigs[nextIndex].name} (${activeShipConfigs[nextIndex].size} cells)`
         );
       }
       setHoverCells([]);
     },
-    [playerBoard, playerShips, currentShipIndex, orientation, currentShipConfig]
+    [playerBoard, playerShips, currentShipIndex, orientation, currentShipConfig, activeShipConfigs, triggerCellAnim]
   );
 
   const handlePlacementHover = useCallback(
@@ -112,25 +229,57 @@ function App() {
 
       if (result === 'sunk') {
         const sunkShip = enemyShips.find((s) => s.id === sunkShipId);
-        setMessage(`You sunk the enemy's ${sunkShip?.name}!`);
+        setPlayerMessage(`You sunk the enemy's ${sunkShip?.name}!`);
+        playSunkSound();
+        shotCountRef.current.shots++;
+        shotCountRef.current.hits++;
+        // Animate all sunk ship cells
+        if (sunkShip) {
+          for (const pos of sunkShip.positions) {
+            triggerCellAnim(pos.row, pos.col, 'sunk');
+          }
+        }
       } else if (result === 'hit') {
-        setMessage('Hit!');
+        setPlayerMessage('Hit!');
+        playHitSound();
+        shotCountRef.current.shots++;
+        shotCountRef.current.hits++;
+        triggerCellAnim(row, col, 'hit');
       } else {
-        setMessage('Miss!');
+        setPlayerMessage('Miss!');
+        playMissSound();
+        shotCountRef.current.shots++;
+        triggerCellAnim(row, col, 'miss');
       }
+      const coordLabel = `${COL_LABELS[col]}${row + 1}`;
+      setShotLog(prev => [...prev, { player: 'You', coord: coordLabel, result }]);
+      setAiMessage('');
 
       if (allShipsSunk(enemyShips)) {
         setGamePhase('gameOver');
         setWinner('player');
-        setMessage('You win! All enemy ships have been sunk!');
+        setShowGameOverOverlay(true);
+        setPlayerMessage('You win! All enemy ships have been sunk!');
+        setAiMessage('');
+        playGameOverSound(true);
+        setStats(prev => {
+          const updated = {
+            ...prev,
+            wins: prev.wins + 1,
+            totalShots: prev.totalShots + shotCountRef.current.shots,
+            totalHits: prev.totalHits + shotCountRef.current.hits,
+          };
+          saveStats(updated);
+          return updated;
+        });
         return;
       }
 
       setIsPlayerTurn(false);
 
       // AI turn after a delay
-      setTimeout(() => {
-        const aiMove = getAIMove(aiStateRef.current);
+      aiTimeoutRef.current = setTimeout(() => {
+        const aiMove = getAIMove(aiStateRef.current, difficulty, playerBoard, activeShipConfigs);
         const {
           newBoard: aiNewBoard,
           result: aiResult,
@@ -140,29 +289,81 @@ function App() {
         updateAIAfterAttack(aiStateRef.current, aiMove, aiResult);
         setPlayerBoard(aiNewBoard);
 
+        const aiCoordLabel = `${COL_LABELS[aiMove.col]}${aiMove.row + 1}`;
         if (aiResult === 'sunk') {
           const sunkShip = playerShips.find((s) => s.id === aiSunkShipId);
-          setMessage(`AI sunk your ${sunkShip?.name}! Your turn.`);
+          setAiMessage(`AI sunk your ${sunkShip?.name}!`);
+          playSunkSound();
+          if (sunkShip) {
+            for (const pos of sunkShip.positions) {
+              triggerCellAnim(pos.row, pos.col, 'sunk');
+            }
+          }
         } else if (aiResult === 'hit') {
-          setMessage('AI hit one of your ships! Your turn.');
+          setAiMessage('AI hit one of your ships!');
+          playHitSound();
+          triggerCellAnim(aiMove.row, aiMove.col, 'hit');
         } else {
-          setMessage('AI missed! Your turn.');
+          setAiMessage('AI missed!');
+          triggerCellAnim(aiMove.row, aiMove.col, 'miss');
         }
+        setShotLog(prev => [...prev, { player: 'AI', coord: aiCoordLabel, result: aiResult }]);
 
         if (allShipsSunk(playerShips)) {
           setGamePhase('gameOver');
           setWinner('ai');
-          setMessage('Game Over! The AI sunk all your ships!');
+          setShowGameOverOverlay(true);
+          setPlayerMessage('Game Over!');
+          setAiMessage('The AI sunk all your ships!');
+          playGameOverSound(false);
+          setStats(prev => {
+            const updated = {
+              ...prev,
+              losses: prev.losses + 1,
+              totalShots: prev.totalShots + shotCountRef.current.shots,
+              totalHits: prev.totalHits + shotCountRef.current.hits,
+            };
+            saveStats(updated);
+            return updated;
+          });
           return;
         }
 
         setIsPlayerTurn(true);
       }, 600);
     },
-    [gamePhase, isPlayerTurn, enemyBoard, enemyShips, playerBoard, playerShips]
+    [gamePhase, isPlayerTurn, enemyBoard, enemyShips, playerBoard, playerShips, difficulty, activeShipConfigs, triggerCellAnim]
   );
 
+  // Handle coordinate input fire
+  const handleCoordFire = useCallback(() => {
+    if (!coordInput.trim()) return;
+    const parsed = parseCoord(coordInput);
+    if (!parsed) {
+      setCoordError('Invalid coordinate (e.g. B5)');
+      return;
+    }
+    setCoordError('');
+    setCoordInput('');
+    handleAttack(parsed.row, parsed.col);
+  }, [coordInput, parseCoord, handleAttack]);
+
+  const handleSetupComplete = useCallback(() => {
+    const trimmed = nameInput.trim() || 'Admiral';
+    const updated = { ...stats, playerName: trimmed };
+    setStats(updated);
+    saveStats(updated);
+    setGamePhase('placement');
+  }, [nameInput, stats]);
+
   const handlePlayAgain = useCallback(() => {
+    if (aiTimeoutRef.current) {
+      clearTimeout(aiTimeoutRef.current);
+      aiTimeoutRef.current = null;
+    }
+    shotCountRef.current = { shots: 0, hits: 0 };
+    setElapsedTime(0);
+    setShotLog([]);
     setGamePhase('placement');
     setPlayerBoard(createEmptyBoard());
     setEnemyBoard(createEmptyBoard());
@@ -171,25 +372,117 @@ function App() {
     setOrientation('horizontal');
     setCurrentShipIndex(0);
     setIsPlayerTurn(true);
-    setMessage('Place your Carrier (5 cells)');
+    setPlayerMessage('');
+    setAiMessage('');
+    setPlacementMessage(`Place your ${selectedFleet.ships[0].name} (${selectedFleet.ships[0].size} cells)`);
     setWinner(null);
     setHoverCells([]);
     setLastHit(null);
+    setShowNewGameConfirm(false);
+    setShowGameOverOverlay(false);
+    setRevealEnemyShips(false);
+    setCoordInput('');
+    setCoordError('');
+    setAnimatingCells(new Map());
     aiStateRef.current = createAIState();
-  }, []);
+  }, [selectedFleet]);
+
+  const handleNewGame = useCallback(() => {
+    if (gamePhase === 'playing') {
+      setShowNewGameConfirm(true);
+    } else {
+      handlePlayAgain();
+    }
+  }, [gamePhase, handlePlayAgain]);
 
   const handleRandomPlacement = useCallback(() => {
-    const { board, ships } = placeShipsRandomly();
+    const { board, ships } = placeShipsRandomly(activeShipConfigs);
     setPlayerBoard(board);
     setPlayerShips(ships);
+    setCurrentShipIndex(activeShipConfigs.length);
+    setPlacementMessage('Ships placed randomly. Review your layout, then click Start Game!');
+    setHoverCells([]);
+  }, [activeShipConfigs]);
 
-    const { board: aBoard, ships: aShips } = placeShipsRandomly();
+  const handleStartGame = useCallback(() => {
+    if (playerShips.length < activeShipConfigs.length) return;
+    const { board: aBoard, ships: aShips } = placeShipsRandomly(activeShipConfigs);
     setEnemyBoard(aBoard);
     setEnemyShips(aShips);
-    setCurrentShipIndex(SHIP_CONFIGS.length);
     setGamePhase('playing');
-    setMessage('Your turn! Click on the enemy board to attack.');
-  }, []);
+    setPlayerMessage('Your turn! Click on the enemy board to attack.');
+    setAiMessage('');
+    setElapsedTime(0);
+    setShotLog([]);
+    playStartSound();
+  }, [playerShips, activeShipConfigs]);
+
+  const handleUndoLastShip = useCallback(() => {
+    if (playerShips.length === 0) return;
+    const newShips = playerShips.slice(0, -1);
+    // Rebuild board from remaining ships
+    const board = createEmptyBoard();
+    for (const ship of newShips) {
+      for (const pos of ship.positions) {
+        board[pos.row][pos.col] = 'ship';
+      }
+    }
+    setPlayerBoard(board);
+    setPlayerShips(newShips);
+    setCurrentShipIndex(newShips.length);
+    setPlacementMessage(
+      `Place your ${activeShipConfigs[newShips.length].name} (${activeShipConfigs[newShips.length].size} cells)`
+    );
+    setHoverCells([]);
+  }, [playerShips, activeShipConfigs]);
+
+  const handleResetPlacement = useCallback(() => {
+    setPlayerBoard(createEmptyBoard());
+    setPlayerShips([]);
+    setCurrentShipIndex(0);
+    setPlacementMessage(`Place your ${activeShipConfigs[0].name} (${activeShipConfigs[0].size} cells)`);
+    setHoverCells([]);
+  }, [activeShipConfigs]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Don't intercept when typing in input fields
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+      switch (e.key.toLowerCase()) {
+        case 'r':
+          if (gamePhase === 'placement' && currentShipIndex < activeShipConfigs.length) {
+            e.preventDefault();
+            setOrientation(o => o === 'horizontal' ? 'vertical' : 'horizontal');
+          }
+          break;
+        case 'n':
+          e.preventDefault();
+          handleNewGame();
+          break;
+        case 'u':
+          if (gamePhase === 'placement' && playerShips.length > 0) {
+            e.preventDefault();
+            handleUndoLastShip();
+          }
+          break;
+        case 'f':
+          e.preventDefault();
+          toggleFullscreen();
+          break;
+        case '/':
+          if (gamePhase === 'playing' && isPlayerTurn) {
+            e.preventDefault();
+            coordInputRef.current?.focus();
+          }
+          break;
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [gamePhase, currentShipIndex, activeShipConfigs.length, playerShips.length, isPlayerTurn, handleNewGame, handleUndoLastShip, toggleFullscreen]);
 
   const renderCell = (
     cell: CellState,
@@ -210,6 +503,10 @@ function App() {
     if (cell === 'ship' && !isEnemy) {
       bgClass = 'bg-blue-500/70';
       borderClass = 'border-blue-400/50';
+    } else if (cell === 'ship' && isEnemy && revealEnemyShips) {
+      bgClass = 'bg-blue-500/40';
+      borderClass = 'border-blue-400/30';
+      content = '■';
     } else if (cell === 'hit') {
       bgClass = 'bg-red-500/80';
       content = '💥';
@@ -244,12 +541,22 @@ function App() {
       cursorClass = 'cursor-pointer';
     }
 
+    // Check for animation class
+    const cellKey = `${row},${col}`;
+    const animType = animatingCells.get(cellKey);
+    let animClass = '';
+    if (animType === 'hit') animClass = 'cell-hit-anim';
+    else if (animType === 'miss') animClass = 'cell-miss-anim';
+    else if (animType === 'sunk') animClass = 'cell-sunk-anim';
+    else if (animType === 'place') animClass = 'cell-place-anim';
+
     return (
       <button
         key={`${row}-${col}`}
-        className={`w-9 h-9 sm:w-10 sm:h-10 border ${borderClass} ${bgClass} ${cursorClass} 
-          flex items-center justify-center text-sm transition-all duration-150 
-          ${isLastHit ? 'ring-2 ring-yellow-400 animate-pulse' : ''}`}
+        className={`w-6 h-6 sm:w-9 sm:h-9 md:w-10 md:h-10 border ${borderClass} ${bgClass} ${cursorClass} 
+          flex items-center justify-center text-xs sm:text-sm transition-all duration-150 
+          ${isLastHit ? 'ring-2 ring-yellow-400 animate-pulse' : ''}
+          ${animClass}`}
         onClick={onClick}
         onMouseEnter={
           gamePhase === 'placement' && !isEnemy
@@ -281,13 +588,13 @@ function App() {
     isEnemy: boolean,
     onCellClick?: (row: number, col: number) => void
   ) => (
-    <div className="inline-block">
+    <div className="inline-block overflow-x-auto max-w-full">
       {/* Column headers */}
-      <div className="flex ml-9 sm:ml-10">
+      <div className="flex ml-6 sm:ml-9 md:ml-10">
         {COL_LABELS.map((label) => (
           <div
             key={label}
-            className="w-9 h-6 sm:w-10 flex items-center justify-center text-xs font-bold text-cyan-300/80"
+            className="w-6 h-6 sm:w-9 md:w-10 flex items-center justify-center text-xs font-bold text-cyan-300/80"
           >
             {label}
           </div>
@@ -297,7 +604,7 @@ function App() {
       {board.map((row, rowIndex) => (
         <div key={rowIndex} className="flex">
           {/* Row number */}
-          <div className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center text-xs font-bold text-cyan-300/80">
+          <div className="w-6 h-6 sm:w-9 sm:h-9 md:w-10 md:h-10 flex items-center justify-center text-xs font-bold text-cyan-300/80">
             {rowIndex + 1}
           </div>
           {row.map((cell, colIndex) =>
@@ -316,10 +623,11 @@ function App() {
         {label}
       </h3>
       <div className="space-y-1.5">
-        {SHIP_CONFIGS.map((config) => {
-          const ship = ships.find((s) => s.id === config.id);
+          {activeShipConfigs.map((config) => {
+            const ship = ships.find((s) => s.id === config.id);
           const sunk = ship ? isShipSunk(ship) : false;
           const hitCount = ship ? ship.hits.size : 0;
+          const isEnemyPanel = label === 'Enemy Ships';
 
           return (
             <div key={config.id} className="flex items-center gap-2">
@@ -335,7 +643,7 @@ function App() {
                     className={`w-4 h-4 rounded-sm border ${
                       sunk
                         ? 'bg-red-600/80 border-red-500'
-                        : ship && i < hitCount
+                        : !isEnemyPanel && ship && i < hitCount
                           ? 'bg-orange-500/80 border-orange-400'
                           : ship
                             ? 'bg-blue-500/60 border-blue-400/50'
@@ -351,46 +659,224 @@ function App() {
     </div>
   );
 
+  const accuracy = stats.totalShots > 0 ? Math.round((stats.totalHits / stats.totalShots) * 100) : 0;
+  const totalGames = stats.wins + stats.losses;
+
+  if (gamePhase === 'setup') {
+    return (
+      <div className="min-h-screen text-white flex flex-col items-center justify-center p-4">
+        <h1 className="text-4xl sm:text-5xl font-black tracking-tight mb-2">
+          <span className="text-cyan-400">BATTLE</span>
+          <span className="text-slate-300">SHIP</span>
+        </h1>
+        <p className="text-slate-400 text-sm mb-8">Naval Combat Strategy Game</p>
+        <div className="bg-slate-800/80 rounded-2xl p-8 max-w-sm w-full border border-slate-600 shadow-2xl">
+          <label className="block text-sm font-semibold text-cyan-300 mb-2 uppercase tracking-wider">
+            Commander Name
+          </label>
+          <input
+            type="text"
+            value={nameInput}
+            onChange={(e) => setNameInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSetupComplete()}
+            placeholder="Enter your name..."
+            className="w-full px-4 py-3 bg-slate-700 border border-slate-500 rounded-lg text-white placeholder-slate-400
+              focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 text-lg"
+            autoFocus
+          />
+          <button
+            onClick={handleSetupComplete}
+            className="w-full mt-4 px-6 py-3 bg-cyan-600 hover:bg-cyan-500 rounded-xl text-lg font-bold
+              transition-all border border-cyan-400/50 shadow-lg shadow-cyan-900/40
+              hover:shadow-cyan-800/60 active:scale-95"
+          >
+            Set Sail!
+          </button>
+          {totalGames > 0 && (
+            <div className="mt-6 pt-4 border-t border-slate-600">
+              <h3 className="text-sm font-bold text-slate-300 mb-2">Previous Record</h3>
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div>
+                  <div className="text-green-400 text-xl font-black">{stats.wins}</div>
+                  <div className="text-xs text-slate-400">Wins</div>
+                </div>
+                <div>
+                  <div className="text-red-400 text-xl font-black">{stats.losses}</div>
+                  <div className="text-xs text-slate-400">Losses</div>
+                </div>
+                <div>
+                  <div className="text-cyan-400 text-xl font-black">{accuracy}%</div>
+                  <div className="text-xs text-slate-400">Accuracy</div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        <footer className="mt-12 text-center text-slate-500 text-xs">
+          Created by Max Sapo solely for the purpose of the Cognition Labs interview demo
+        </footer>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen text-white p-4 sm:p-6">
       {/* Header */}
-      <header className="text-center mb-6">
+      <header className="text-center mb-6 relative">
+        <div className="absolute left-0 top-1/2 -translate-y-1/2 flex gap-2">
+          <button
+            onClick={toggleSound}
+            className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-semibold
+              transition-colors border border-slate-600/50 text-slate-300 hover:text-white"
+            title={soundEnabled ? 'Mute sounds (M)' : 'Unmute sounds (M)'}
+          >
+            {soundEnabled ? '🔊' : '🔇'}
+          </button>
+          <button
+            onClick={toggleFullscreen}
+            className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-semibold
+              transition-colors border border-slate-600/50 text-slate-300 hover:text-white"
+            title={isFullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)'}
+          >
+            {isFullscreen ? '⊡' : '⛶'}
+          </button>
+        </div>
         <h1 className="text-4xl sm:text-5xl font-black tracking-tight">
           <span className="text-cyan-400">BATTLE</span>
           <span className="text-slate-300">SHIP</span>
         </h1>
-        <p className="text-slate-400 text-sm mt-1">Naval Combat Strategy Game</p>
+        <p className="text-slate-400 text-sm mt-1">Commander {stats.playerName}</p>
+        <button
+          onClick={handleNewGame}
+          className="absolute right-0 top-1/2 -translate-y-1/2 px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-semibold
+            transition-colors border border-slate-600/50 text-slate-300 hover:text-white"
+        >
+          New Game
+        </button>
       </header>
 
       {/* Message bar */}
       <div className="max-w-3xl mx-auto mb-4">
-        <div
-          className={`text-center py-2.5 px-4 rounded-lg font-semibold text-sm ${
-            winner === 'player'
-              ? 'bg-green-600/30 border border-green-500/50 text-green-300'
-              : winner === 'ai'
-                ? 'bg-red-600/30 border border-red-500/50 text-red-300'
-                : 'bg-slate-800/60 border border-slate-700/50 text-cyan-200'
-          }`}
-        >
-          {message}
-        </div>
+        {gamePhase === 'placement' ? (
+          <div className="text-center py-2.5 px-4 rounded-lg font-semibold text-sm bg-slate-800/60 border border-slate-700/50 text-cyan-200">
+            {placementMessage}
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            {playerMessage && (
+              <div
+                className={`flex-1 text-center py-2.5 px-4 rounded-lg font-semibold text-sm ${
+                  winner === 'player'
+                    ? 'bg-green-600/30 border border-green-500/50 text-green-300'
+                    : 'bg-blue-600/20 border border-blue-500/40 text-blue-200'
+                }`}
+              >
+                {playerMessage}
+              </div>
+            )}
+            {aiMessage && (
+              <div
+                className={`flex-1 text-center py-2.5 px-4 rounded-lg font-semibold text-sm ${
+                  winner === 'ai'
+                    ? 'bg-red-600/30 border border-red-500/50 text-red-300'
+                    : 'bg-amber-600/20 border border-amber-500/40 text-amber-200'
+                }`}
+              >
+                {aiMessage}
+              </div>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* Fleet & Difficulty selector - only during placement */}
+      {gamePhase === 'placement' && (
+        <div className="flex flex-col items-center gap-3 mb-4">
+          {/* Fleet preset selector */}
+          <div className="flex flex-wrap justify-center gap-2">
+            <span className="text-xs text-slate-400 self-center mr-1">Fleet:</span>
+            {FLEET_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                onClick={() => {
+                  if (preset.id !== selectedFleet.id) {
+                    setSelectedFleet(preset);
+                    setPlayerBoard(createEmptyBoard());
+                    setPlayerShips([]);
+                    setCurrentShipIndex(0);
+                    setPlacementMessage(`Place your ${preset.ships[0].name} (${preset.ships[0].size} cells)`);
+                    setHoverCells([]);
+                  }
+                }}
+                disabled={playerShips.length > 0 && preset.id !== selectedFleet.id}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
+                  selectedFleet.id === preset.id
+                    ? 'bg-cyan-600 border-cyan-500 text-white'
+                    : playerShips.length > 0
+                      ? 'bg-slate-800 border-slate-700 text-slate-600 cursor-not-allowed'
+                      : 'bg-slate-700 border-slate-600/50 text-slate-400 hover:text-white hover:bg-slate-600'
+                }`}
+                title={preset.description}
+              >
+                {preset.name}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-slate-500">{selectedFleet.description}</p>
+          {/* Difficulty selector */}
+          <div className="flex justify-center gap-2">
+            <span className="text-xs text-slate-400 self-center mr-1">Difficulty:</span>
+            {(['easy', 'medium', 'hard'] as Difficulty[]).map((d) => (
+              <button
+                key={d}
+                onClick={() => setDifficulty(d)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
+                  difficulty === d
+                    ? d === 'easy'
+                      ? 'bg-green-600 border-green-500 text-white'
+                      : d === 'medium'
+                        ? 'bg-amber-600 border-amber-500 text-white'
+                        : 'bg-red-600 border-red-500 text-white'
+                    : 'bg-slate-700 border-slate-600/50 text-slate-400 hover:text-white hover:bg-slate-600'
+                }`}
+              >
+                {d.charAt(0).toUpperCase() + d.slice(1)}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Timer display during game */}
+      {(gamePhase === 'playing' || gamePhase === 'gameOver') && (
+        <div className="text-center mb-2">
+          <span className="text-xs text-slate-400">
+            ⏱ {formatTime(elapsedTime)}
+            {gamePhase === 'playing' && (
+              <span className="ml-3 text-slate-500">
+                {difficulty.charAt(0).toUpperCase() + difficulty.slice(1)} AI
+              </span>
+            )}
+          </span>
+        </div>
+      )}
 
       {/* Placement controls */}
       {gamePhase === 'placement' && (
-        <div className="flex justify-center gap-3 mb-4">
-          <button
-            onClick={() =>
-              setOrientation((o) =>
-                o === 'horizontal' ? 'vertical' : 'horizontal'
-              )
-            }
-            className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-semibold 
-              transition-colors border border-cyan-500/50 shadow-lg shadow-cyan-900/30"
-          >
-            Orientation: {orientation === 'horizontal' ? '→ Horizontal' : '↓ Vertical'}
-          </button>
+        <div className="flex flex-wrap justify-center gap-3 mb-4">
+          {currentShipIndex < activeShipConfigs.length && (
+            <button
+              onClick={() =>
+                setOrientation((o) =>
+                  o === 'horizontal' ? 'vertical' : 'horizontal'
+                )
+              }
+              className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-semibold 
+                transition-colors border border-cyan-500/50 shadow-lg shadow-cyan-900/30"
+            >
+              Orientation: {orientation === 'horizontal' ? '→ Horizontal' : '↓ Vertical'}
+            </button>
+          )}
           <button
             onClick={handleRandomPlacement}
             className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg text-sm font-semibold 
@@ -398,6 +884,33 @@ function App() {
           >
             Random Placement
           </button>
+          {playerShips.length > 0 && (
+            <>
+              <button
+                onClick={handleUndoLastShip}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-500 rounded-lg text-sm font-semibold
+                  transition-colors border border-amber-500/50 shadow-lg shadow-amber-900/30"
+              >
+                Undo Last Ship
+              </button>
+              <button
+                onClick={handleResetPlacement}
+                className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg text-sm font-semibold
+                  transition-colors border border-red-500/50 shadow-lg shadow-red-900/30"
+              >
+                Reset All
+              </button>
+            </>
+          )}
+          {currentShipIndex >= activeShipConfigs.length && (
+            <button
+              onClick={handleStartGame}
+              className="px-6 py-2 bg-green-600 hover:bg-green-500 rounded-lg text-sm font-bold
+                transition-colors border border-green-500/50 shadow-lg shadow-green-900/30 animate-pulse"
+            >
+              Start Game
+            </button>
+          )}
         </div>
       )}
 
@@ -440,23 +953,79 @@ function App() {
         )}
       </div>
 
-      {/* Turn indicator */}
-      {gamePhase === 'playing' && (
-        <div className="text-center mt-4">
-          <span
-            className={`inline-block px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider ${
-              isPlayerTurn
-                ? 'bg-green-600/30 text-green-300 border border-green-500/40'
-                : 'bg-amber-600/30 text-amber-300 border border-amber-500/40 animate-pulse'
-            }`}
-          >
-            {isPlayerTurn ? 'Your Turn' : 'AI Thinking...'}
-          </span>
+      {/* Turn indicator + Coordinate input + Shot log */}
+      {(gamePhase === 'playing' || gamePhase === 'gameOver') && (
+        <div className="max-w-3xl mx-auto mt-4 flex flex-col items-center gap-3">
+          {gamePhase === 'playing' && (
+            <div className="flex flex-col items-center gap-2">
+              <span
+                className={`inline-block px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider ${
+                  isPlayerTurn
+                    ? 'bg-green-600/30 text-green-300 border border-green-500/40'
+                    : 'bg-amber-600/30 text-amber-300 border border-amber-500/40 animate-pulse'
+                }`}
+              >
+                {isPlayerTurn ? 'Your Turn' : 'AI Thinking...'}
+              </span>
+              {/* Coordinate targeting input */}
+              {isPlayerTurn && (
+                <div className="flex items-center gap-2">
+                  <input
+                    ref={coordInputRef}
+                    type="text"
+                    value={coordInput}
+                    onChange={(e) => { setCoordInput(e.target.value.toUpperCase()); setCoordError(''); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleCoordFire(); }}
+                    placeholder="B5"
+                    maxLength={3}
+                    className="coord-input w-16 px-2 py-1.5 bg-slate-700 border border-slate-500 rounded-lg text-white text-center text-sm
+                      focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400"
+                    title='Type coordinate and press Enter to fire (press "/" to focus)'
+                  />
+                  <button
+                    onClick={handleCoordFire}
+                    disabled={!coordInput.trim()}
+                    className="px-3 py-1.5 bg-red-600 hover:bg-red-500 rounded-lg text-xs font-bold
+                      transition-colors border border-red-500/50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Fire!
+                  </button>
+                  {coordError && <span className="text-red-400 text-xs">{coordError}</span>}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Shot history log */}
+          {shotLog.length > 0 && (
+            <details className="w-full max-w-md">
+              <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-300 text-center">
+                Shot Log ({shotLog.length} moves)
+              </summary>
+              <div className="mt-2 max-h-32 overflow-y-auto bg-slate-800/60 rounded-lg border border-slate-700/50 p-2">
+                {shotLog.slice().reverse().map((entry, i) => (
+                  <div key={i} className="flex justify-between text-xs py-0.5 px-2">
+                    <span className={entry.player === 'You' ? 'text-blue-300' : 'text-amber-300'}>
+                      {entry.player}
+                    </span>
+                    <span className="text-slate-400">{entry.coord}</span>
+                    <span className={
+                      entry.result === 'sunk' ? 'text-red-400 font-bold'
+                        : entry.result === 'hit' ? 'text-orange-400'
+                          : 'text-slate-500'
+                    }>
+                      {entry.result.toUpperCase()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       )}
 
       {/* Game over overlay */}
-      {gamePhase === 'gameOver' && (
+      {gamePhase === 'gameOver' && showGameOverOverlay && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 backdrop-blur-sm">
           <div className="bg-slate-800 rounded-2xl p-8 max-w-md mx-4 text-center border border-slate-600 shadow-2xl">
             <h2
@@ -469,15 +1038,85 @@ function App() {
                 ? 'You destroyed the entire enemy fleet!'
                 : 'The AI has sunk all your ships.'}
             </p>
+            <div className="flex flex-col gap-3">
+              <button
+                onClick={handlePlayAgain}
+                className="px-8 py-3 bg-cyan-600 hover:bg-cyan-500 rounded-xl text-lg font-bold 
+                  transition-all border border-cyan-400/50 shadow-lg shadow-cyan-900/40 
+                  hover:shadow-cyan-800/60 active:scale-95"
+              >
+                Play Again
+              </button>
+              <button
+                onClick={() => { setShowGameOverOverlay(false); setRevealEnemyShips(true); }}
+                className="px-8 py-3 bg-slate-600 hover:bg-slate-500 rounded-xl text-sm font-semibold
+                  transition-all border border-slate-500/50"
+              >
+                View Final Board
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Persistent Play Again banner when viewing final board */}
+      {gamePhase === 'gameOver' && !showGameOverOverlay && (
+        <div className="fixed bottom-0 left-0 right-0 z-40 bg-slate-800/95 border-t border-slate-600 backdrop-blur-sm">
+          <div className="max-w-3xl mx-auto flex items-center justify-between px-6 py-3">
+            <span className={`font-bold ${winner === 'player' ? 'text-green-400' : 'text-red-400'}`}>
+              {winner === 'player' ? 'VICTORY!' : 'DEFEAT!'} — Viewing final board
+            </span>
             <button
               onClick={handlePlayAgain}
-              className="px-8 py-3 bg-cyan-600 hover:bg-cyan-500 rounded-xl text-lg font-bold 
-                transition-all border border-cyan-400/50 shadow-lg shadow-cyan-900/40 
-                hover:shadow-cyan-800/60 active:scale-95"
+              className="px-6 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-bold
+                transition-colors border border-cyan-400/50"
             >
               Play Again
             </button>
           </div>
+        </div>
+      )}
+
+      {/* New Game confirmation dialog */}
+      {showNewGameConfirm && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 backdrop-blur-sm">
+          <div className="bg-slate-800 rounded-2xl p-8 max-w-sm mx-4 text-center border border-slate-600 shadow-2xl">
+            <h2 className="text-xl font-bold text-amber-300 mb-3">Start New Game?</h2>
+            <p className="text-slate-300 mb-6 text-sm">
+              Your current game is still in progress. Are you sure you want to start a new game?
+            </p>
+            <div className="flex gap-3 justify-center">
+              <button
+                onClick={() => setShowNewGameConfirm(false)}
+                className="px-6 py-2.5 bg-slate-600 hover:bg-slate-500 rounded-lg text-sm font-semibold
+                  transition-colors border border-slate-500/50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handlePlayAgain}
+                className="px-6 py-2.5 bg-red-600 hover:bg-red-500 rounded-lg text-sm font-semibold
+                  transition-colors border border-red-500/50"
+              >
+                New Game
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stats bar */}
+      {totalGames > 0 && (
+        <div className="max-w-3xl mx-auto mt-4 flex justify-center gap-6">
+          <span className="text-xs text-slate-400">
+            <span className="text-green-400 font-bold">{stats.wins}W</span> / <span className="text-red-400 font-bold">{stats.losses}L</span>
+          </span>
+          <span className="text-xs text-slate-400">
+            Accuracy: <span className="text-cyan-400 font-bold">{accuracy}%</span>
+          </span>
+          <span className="text-xs text-slate-400">
+            Games: <span className="text-white font-bold">{totalGames}</span>
+          </span>
         </div>
       )}
 
@@ -498,6 +1137,26 @@ function App() {
           </div>
         ))}
       </div>
+
+      {/* Keyboard shortcuts hint */}
+      <div className="flex justify-center mt-3">
+        <details className="text-center">
+          <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-400">Keyboard Shortcuts</summary>
+          <div className="mt-2 bg-slate-800/60 rounded-lg border border-slate-700/50 p-3 text-xs text-slate-400 grid grid-cols-2 gap-x-6 gap-y-1">
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">R</kbd> Rotate ship</span>
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">N</kbd> New game</span>
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">U</kbd> Undo ship</span>
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">F</kbd> Fullscreen</span>
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">/</kbd> Focus target input</span>
+            <span><kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300 font-mono">Enter</kbd> Fire at coordinate</span>
+          </div>
+        </details>
+      </div>
+
+      {/* Footer */}
+      <footer className="text-center mt-8 text-slate-500 text-xs">
+        Created by Max Sapo solely for the purpose of the Cognition Labs interview demo
+      </footer>
     </div>
   );
 }
