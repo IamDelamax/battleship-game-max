@@ -101,6 +101,7 @@ function App() {
   const [hoverValid, setHoverValid] = useState(false);
   const [lastHit, setLastHit] = useState<Position | null>(null);
   const aiStateRef = useRef<AIStateType>(createAIState());
+  const aiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showNewGameConfirm, setShowNewGameConfirm] = useState(false);
   const [showGameOverOverlay, setShowGameOverOverlay] = useState(false);
   const [revealEnemyShips, setRevealEnemyShips] = useState(false);
@@ -214,7 +215,7 @@ function App() {
       setIsPlayerTurn(false);
 
       // AI turn after a delay
-      setTimeout(() => {
+      aiTimeoutRef.current = setTimeout(() => {
         const aiMove = getAIMove(aiStateRef.current, difficulty, playerBoard, activeShipConfigs);
         const {
           newBoard: aiNewBoard,
@@ -273,6 +274,10 @@ function App() {
   }, [nameInput, stats]);
 
   const handlePlayAgain = useCallback(() => {
+    if (aiTimeoutRef.current) {
+      clearTimeout(aiTimeoutRef.current);
+      aiTimeoutRef.current = null;
+    }
     shotCountRef.current = { shots: 0, hits: 0 };
     setElapsedTime(0);
     setShotLog([]);
