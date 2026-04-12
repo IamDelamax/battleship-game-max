@@ -42,6 +42,9 @@ function App() {
   const [hoverValid, setHoverValid] = useState(false);
   const [lastHit, setLastHit] = useState<Position | null>(null);
   const aiStateRef = useRef<AIStateType>(createAIState());
+  const [showNewGameConfirm, setShowNewGameConfirm] = useState(false);
+  const [showGameOverOverlay, setShowGameOverOverlay] = useState(false);
+  const [revealEnemyShips, setRevealEnemyShips] = useState(false);
 
   const currentShipConfig: ShipConfig | undefined = SHIP_CONFIGS[currentShipIndex];
 
@@ -122,6 +125,7 @@ function App() {
       if (allShipsSunk(enemyShips)) {
         setGamePhase('gameOver');
         setWinner('player');
+        setShowGameOverOverlay(true);
         setMessage('You win! All enemy ships have been sunk!');
         return;
       }
@@ -152,6 +156,7 @@ function App() {
         if (allShipsSunk(playerShips)) {
           setGamePhase('gameOver');
           setWinner('ai');
+          setShowGameOverOverlay(true);
           setMessage('Game Over! The AI sunk all your ships!');
           return;
         }
@@ -175,8 +180,19 @@ function App() {
     setWinner(null);
     setHoverCells([]);
     setLastHit(null);
+    setShowNewGameConfirm(false);
+    setShowGameOverOverlay(false);
+    setRevealEnemyShips(false);
     aiStateRef.current = createAIState();
   }, []);
+
+  const handleNewGame = useCallback(() => {
+    if (gamePhase === 'playing') {
+      setShowNewGameConfirm(true);
+    } else {
+      handlePlayAgain();
+    }
+  }, [gamePhase, handlePlayAgain]);
 
   const handleRandomPlacement = useCallback(() => {
     const { board, ships } = placeShipsRandomly();
@@ -210,6 +226,10 @@ function App() {
     if (cell === 'ship' && !isEnemy) {
       bgClass = 'bg-blue-500/70';
       borderClass = 'border-blue-400/50';
+    } else if (cell === 'ship' && isEnemy && revealEnemyShips) {
+      bgClass = 'bg-blue-500/40';
+      borderClass = 'border-blue-400/30';
+      content = '■';
     } else if (cell === 'hit') {
       bgClass = 'bg-red-500/80';
       content = '💥';
@@ -320,6 +340,7 @@ function App() {
           const ship = ships.find((s) => s.id === config.id);
           const sunk = ship ? isShipSunk(ship) : false;
           const hitCount = ship ? ship.hits.size : 0;
+          const isEnemyPanel = label === 'Enemy Ships';
 
           return (
             <div key={config.id} className="flex items-center gap-2">
@@ -335,7 +356,7 @@ function App() {
                     className={`w-4 h-4 rounded-sm border ${
                       sunk
                         ? 'bg-red-600/80 border-red-500'
-                        : ship && i < hitCount
+                        : !isEnemyPanel && ship && i < hitCount
                           ? 'bg-orange-500/80 border-orange-400'
                           : ship
                             ? 'bg-blue-500/60 border-blue-400/50'
@@ -354,12 +375,19 @@ function App() {
   return (
     <div className="min-h-screen text-white p-4 sm:p-6">
       {/* Header */}
-      <header className="text-center mb-6">
+      <header className="text-center mb-6 relative">
         <h1 className="text-4xl sm:text-5xl font-black tracking-tight">
           <span className="text-cyan-400">BATTLE</span>
           <span className="text-slate-300">SHIP</span>
         </h1>
         <p className="text-slate-400 text-sm mt-1">Naval Combat Strategy Game</p>
+        <button
+          onClick={handleNewGame}
+          className="absolute right-0 top-1/2 -translate-y-1/2 px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-semibold
+            transition-colors border border-slate-600/50 text-slate-300 hover:text-white"
+        >
+          New Game
+        </button>
       </header>
 
       {/* Message bar */}
@@ -456,7 +484,7 @@ function App() {
       )}
 
       {/* Game over overlay */}
-      {gamePhase === 'gameOver' && (
+      {gamePhase === 'gameOver' && showGameOverOverlay && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 backdrop-blur-sm">
           <div className="bg-slate-800 rounded-2xl p-8 max-w-md mx-4 text-center border border-slate-600 shadow-2xl">
             <h2
@@ -469,14 +497,69 @@ function App() {
                 ? 'You destroyed the entire enemy fleet!'
                 : 'The AI has sunk all your ships.'}
             </p>
+            <div className="flex flex-col gap-3">
+              <button
+                onClick={handlePlayAgain}
+                className="px-8 py-3 bg-cyan-600 hover:bg-cyan-500 rounded-xl text-lg font-bold 
+                  transition-all border border-cyan-400/50 shadow-lg shadow-cyan-900/40 
+                  hover:shadow-cyan-800/60 active:scale-95"
+              >
+                Play Again
+              </button>
+              <button
+                onClick={() => { setShowGameOverOverlay(false); setRevealEnemyShips(true); }}
+                className="px-8 py-3 bg-slate-600 hover:bg-slate-500 rounded-xl text-sm font-semibold
+                  transition-all border border-slate-500/50"
+              >
+                View Final Board
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Persistent Play Again banner when viewing final board */}
+      {gamePhase === 'gameOver' && !showGameOverOverlay && (
+        <div className="fixed bottom-0 left-0 right-0 z-40 bg-slate-800/95 border-t border-slate-600 backdrop-blur-sm">
+          <div className="max-w-3xl mx-auto flex items-center justify-between px-6 py-3">
+            <span className={`font-bold ${winner === 'player' ? 'text-green-400' : 'text-red-400'}`}>
+              {winner === 'player' ? 'VICTORY!' : 'DEFEAT!'} — Viewing final board
+            </span>
             <button
               onClick={handlePlayAgain}
-              className="px-8 py-3 bg-cyan-600 hover:bg-cyan-500 rounded-xl text-lg font-bold 
-                transition-all border border-cyan-400/50 shadow-lg shadow-cyan-900/40 
-                hover:shadow-cyan-800/60 active:scale-95"
+              className="px-6 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-bold
+                transition-colors border border-cyan-400/50"
             >
               Play Again
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* New Game confirmation dialog */}
+      {showNewGameConfirm && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 backdrop-blur-sm">
+          <div className="bg-slate-800 rounded-2xl p-8 max-w-sm mx-4 text-center border border-slate-600 shadow-2xl">
+            <h2 className="text-xl font-bold text-amber-300 mb-3">Start New Game?</h2>
+            <p className="text-slate-300 mb-6 text-sm">
+              Your current game is still in progress. Are you sure you want to start a new game?
+            </p>
+            <div className="flex gap-3 justify-center">
+              <button
+                onClick={() => setShowNewGameConfirm(false)}
+                className="px-6 py-2.5 bg-slate-600 hover:bg-slate-500 rounded-lg text-sm font-semibold
+                  transition-colors border border-slate-500/50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handlePlayAgain}
+                className="px-6 py-2.5 bg-red-600 hover:bg-red-500 rounded-lg text-sm font-semibold
+                  transition-colors border border-red-500/50"
+              >
+                New Game
+              </button>
+            </div>
           </div>
         </div>
       )}

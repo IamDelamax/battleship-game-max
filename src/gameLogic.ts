@@ -25,12 +25,33 @@ export function canPlaceShip(
   size: number,
   orientation: Orientation
 ): boolean {
+  // Collect all cells the ship would occupy
+  const shipCells: Position[] = [];
   for (let i = 0; i < size; i++) {
     const r = orientation === 'vertical' ? row + i : row;
     const c = orientation === 'horizontal' ? col + i : col;
     if (r >= BOARD_SIZE || c >= BOARD_SIZE) return false;
     if (board[r][c] !== 'empty') return false;
+    shipCells.push({ row: r, col: c });
   }
+
+  // Check all 8 neighbors around each ship cell for adjacent ships
+  const directions = [
+    [-1, -1], [-1, 0], [-1, 1],
+    [0, -1],           [0, 1],
+    [1, -1],  [1, 0],  [1, 1],
+  ];
+  for (const cell of shipCells) {
+    for (const [dr, dc] of directions) {
+      const nr = cell.row + dr;
+      const nc = cell.col + dc;
+      if (nr < 0 || nr >= BOARD_SIZE || nc < 0 || nc >= BOARD_SIZE) continue;
+      // Skip if the neighbor is part of the ship being placed
+      if (shipCells.some((sc) => sc.row === nr && sc.col === nc)) continue;
+      if (board[nr][nc] !== 'empty') return false;
+    }
+  }
+
   return true;
 }
 
