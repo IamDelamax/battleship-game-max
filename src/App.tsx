@@ -8,9 +8,10 @@ import {
   ShipConfig,
   GamePhase,
   GameStats,
-  SHIP_CONFIGS,
   BOARD_SIZE,
   COL_LABELS,
+  FleetPreset,
+  FLEET_PRESETS,
 } from './types';
 import {
   setMuted,
@@ -103,8 +104,10 @@ function App() {
   const [showNewGameConfirm, setShowNewGameConfirm] = useState(false);
   const [showGameOverOverlay, setShowGameOverOverlay] = useState(false);
   const [revealEnemyShips, setRevealEnemyShips] = useState(false);
+  const [selectedFleet, setSelectedFleet] = useState<FleetPreset>(FLEET_PRESETS[0]);
 
-  const currentShipConfig: ShipConfig | undefined = SHIP_CONFIGS[currentShipIndex];
+  const activeShipConfigs = selectedFleet.ships;
+  const currentShipConfig: ShipConfig | undefined = activeShipConfigs[currentShipIndex];
 
   const handlePlacementClick = useCallback(
     (row: number, col: number) => {
@@ -127,19 +130,19 @@ function App() {
       setPlayerShips(updatedShips);
 
       const nextIndex = currentShipIndex + 1;
-      if (nextIndex >= SHIP_CONFIGS.length) {
+      if (nextIndex >= activeShipConfigs.length) {
         // All ships placed, let user review before starting
         setCurrentShipIndex(nextIndex);
         setPlacementMessage('All ships placed! Review your layout, then click Start Game!');
       } else {
         setCurrentShipIndex(nextIndex);
         setPlacementMessage(
-          `Place your ${SHIP_CONFIGS[nextIndex].name} (${SHIP_CONFIGS[nextIndex].size} cells)`
+          `Place your ${activeShipConfigs[nextIndex].name} (${activeShipConfigs[nextIndex].size} cells)`
         );
       }
       setHoverCells([]);
     },
-    [playerBoard, playerShips, currentShipIndex, orientation, currentShipConfig]
+    [playerBoard, playerShips, currentShipIndex, orientation, currentShipConfig, activeShipConfigs]
   );
 
   const handlePlacementHover = useCallback(
@@ -212,7 +215,7 @@ function App() {
 
       // AI turn after a delay
       setTimeout(() => {
-        const aiMove = getAIMove(aiStateRef.current, difficulty, playerBoard);
+        const aiMove = getAIMove(aiStateRef.current, difficulty, playerBoard, activeShipConfigs);
         const {
           newBoard: aiNewBoard,
           result: aiResult,
@@ -258,7 +261,7 @@ function App() {
         setIsPlayerTurn(true);
       }, 600);
     },
-    [gamePhase, isPlayerTurn, enemyBoard, enemyShips, playerBoard, playerShips, difficulty]
+    [gamePhase, isPlayerTurn, enemyBoard, enemyShips, playerBoard, playerShips, difficulty, activeShipConfigs]
   );
 
   const handleSetupComplete = useCallback(() => {
@@ -283,7 +286,7 @@ function App() {
     setIsPlayerTurn(true);
     setPlayerMessage('');
     setAiMessage('');
-    setPlacementMessage('Place your Carrier (5 cells)');
+    setPlacementMessage(`Place your ${selectedFleet.ships[0].name} (${selectedFleet.ships[0].size} cells)`);
     setWinner(null);
     setHoverCells([]);
     setLastHit(null);
@@ -291,7 +294,7 @@ function App() {
     setShowGameOverOverlay(false);
     setRevealEnemyShips(false);
     aiStateRef.current = createAIState();
-  }, []);
+  }, [selectedFleet]);
 
   const handleNewGame = useCallback(() => {
     if (gamePhase === 'playing') {
@@ -302,17 +305,17 @@ function App() {
   }, [gamePhase, handlePlayAgain]);
 
   const handleRandomPlacement = useCallback(() => {
-    const { board, ships } = placeShipsRandomly();
+    const { board, ships } = placeShipsRandomly(activeShipConfigs);
     setPlayerBoard(board);
     setPlayerShips(ships);
-    setCurrentShipIndex(SHIP_CONFIGS.length);
+    setCurrentShipIndex(activeShipConfigs.length);
     setPlacementMessage('Ships placed randomly. Review your layout, then click Start Game!');
     setHoverCells([]);
-  }, []);
+  }, [activeShipConfigs]);
 
   const handleStartGame = useCallback(() => {
-    if (playerShips.length < SHIP_CONFIGS.length) return;
-    const { board: aBoard, ships: aShips } = placeShipsRandomly();
+    if (playerShips.length < activeShipConfigs.length) return;
+    const { board: aBoard, ships: aShips } = placeShipsRandomly(activeShipConfigs);
     setEnemyBoard(aBoard);
     setEnemyShips(aShips);
     setGamePhase('playing');
@@ -321,7 +324,7 @@ function App() {
     setElapsedTime(0);
     setShotLog([]);
     playStartSound();
-  }, [playerShips]);
+  }, [playerShips, activeShipConfigs]);
 
   const handleUndoLastShip = useCallback(() => {
     if (playerShips.length === 0) return;
@@ -337,18 +340,18 @@ function App() {
     setPlayerShips(newShips);
     setCurrentShipIndex(newShips.length);
     setPlacementMessage(
-      `Place your ${SHIP_CONFIGS[newShips.length].name} (${SHIP_CONFIGS[newShips.length].size} cells)`
+      `Place your ${activeShipConfigs[newShips.length].name} (${activeShipConfigs[newShips.length].size} cells)`
     );
     setHoverCells([]);
-  }, [playerShips]);
+  }, [playerShips, activeShipConfigs]);
 
   const handleResetPlacement = useCallback(() => {
     setPlayerBoard(createEmptyBoard());
     setPlayerShips([]);
     setCurrentShipIndex(0);
-    setPlacementMessage('Place your Carrier (5 cells)');
+    setPlacementMessage(`Place your ${activeShipConfigs[0].name} (${activeShipConfigs[0].size} cells)`);
     setHoverCells([]);
-  }, []);
+  }, [activeShipConfigs]);
 
   const renderCell = (
     cell: CellState,
@@ -479,8 +482,8 @@ function App() {
         {label}
       </h3>
       <div className="space-y-1.5">
-        {SHIP_CONFIGS.map((config) => {
-          const ship = ships.find((s) => s.id === config.id);
+          {activeShipConfigs.map((config) => {
+            const ship = ships.find((s) => s.id === config.id);
           const sunk = ship ? isShipSunk(ship) : false;
           const hitCount = ship ? ship.hits.size : 0;
           const isEnemyPanel = label === 'Enemy Ships';
@@ -637,27 +640,61 @@ function App() {
         )}
       </div>
 
-      {/* Difficulty selector - only during placement */}
+      {/* Fleet & Difficulty selector - only during placement */}
       {gamePhase === 'placement' && (
-        <div className="flex justify-center gap-2 mb-4">
-          <span className="text-xs text-slate-400 self-center mr-1">Difficulty:</span>
-          {(['easy', 'medium', 'hard'] as Difficulty[]).map((d) => (
-            <button
-              key={d}
-              onClick={() => setDifficulty(d)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
-                difficulty === d
-                  ? d === 'easy'
-                    ? 'bg-green-600 border-green-500 text-white'
-                    : d === 'medium'
-                      ? 'bg-amber-600 border-amber-500 text-white'
-                      : 'bg-red-600 border-red-500 text-white'
-                  : 'bg-slate-700 border-slate-600/50 text-slate-400 hover:text-white hover:bg-slate-600'
-              }`}
-            >
-              {d.charAt(0).toUpperCase() + d.slice(1)}
-            </button>
-          ))}
+        <div className="flex flex-col items-center gap-3 mb-4">
+          {/* Fleet preset selector */}
+          <div className="flex flex-wrap justify-center gap-2">
+            <span className="text-xs text-slate-400 self-center mr-1">Fleet:</span>
+            {FLEET_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                onClick={() => {
+                  if (preset.id !== selectedFleet.id) {
+                    setSelectedFleet(preset);
+                    setPlayerBoard(createEmptyBoard());
+                    setPlayerShips([]);
+                    setCurrentShipIndex(0);
+                    setPlacementMessage(`Place your ${preset.ships[0].name} (${preset.ships[0].size} cells)`);
+                    setHoverCells([]);
+                  }
+                }}
+                disabled={playerShips.length > 0 && preset.id !== selectedFleet.id}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
+                  selectedFleet.id === preset.id
+                    ? 'bg-cyan-600 border-cyan-500 text-white'
+                    : playerShips.length > 0
+                      ? 'bg-slate-800 border-slate-700 text-slate-600 cursor-not-allowed'
+                      : 'bg-slate-700 border-slate-600/50 text-slate-400 hover:text-white hover:bg-slate-600'
+                }`}
+                title={preset.description}
+              >
+                {preset.name}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-slate-500">{selectedFleet.description}</p>
+          {/* Difficulty selector */}
+          <div className="flex justify-center gap-2">
+            <span className="text-xs text-slate-400 self-center mr-1">Difficulty:</span>
+            {(['easy', 'medium', 'hard'] as Difficulty[]).map((d) => (
+              <button
+                key={d}
+                onClick={() => setDifficulty(d)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
+                  difficulty === d
+                    ? d === 'easy'
+                      ? 'bg-green-600 border-green-500 text-white'
+                      : d === 'medium'
+                        ? 'bg-amber-600 border-amber-500 text-white'
+                        : 'bg-red-600 border-red-500 text-white'
+                    : 'bg-slate-700 border-slate-600/50 text-slate-400 hover:text-white hover:bg-slate-600'
+                }`}
+              >
+                {d.charAt(0).toUpperCase() + d.slice(1)}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -678,7 +715,7 @@ function App() {
       {/* Placement controls */}
       {gamePhase === 'placement' && (
         <div className="flex flex-wrap justify-center gap-3 mb-4">
-          {currentShipIndex < SHIP_CONFIGS.length && (
+          {currentShipIndex < activeShipConfigs.length && (
             <button
               onClick={() =>
                 setOrientation((o) =>
@@ -716,7 +753,7 @@ function App() {
               </button>
             </>
           )}
-          {currentShipIndex >= SHIP_CONFIGS.length && (
+          {currentShipIndex >= activeShipConfigs.length && (
             <button
               onClick={handleStartGame}
               className="px-6 py-2 bg-green-600 hover:bg-green-500 rounded-lg text-sm font-bold

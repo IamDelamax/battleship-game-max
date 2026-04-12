@@ -175,7 +175,7 @@ function getAIMoveEasy(aiState: AIState): Position {
   return choice;
 }
 
-function getAIMoveHard(aiState: AIState, board: CellState[][]): Position {
+function getAIMoveHard(aiState: AIState, board: CellState[][], shipConfigs?: ShipConfig[]): Position {
   // In target mode, use hunt/target logic like medium
   while (aiState.targetQueue.length > 0) {
     const target = aiState.targetQueue.shift()!;
@@ -220,7 +220,7 @@ function getAIMoveHard(aiState: AIState, board: CellState[][]): Position {
     }
   }
 
-  const remainingSizes = SHIP_CONFIGS.map(s => s.size).slice();
+  const remainingSizes = (shipConfigs || SHIP_CONFIGS).map(s => s.size).slice();
   for (const ss of sunkSizes) {
     const idx = remainingSizes.indexOf(ss);
     if (idx !== -1) remainingSizes.splice(idx, 1);
@@ -325,12 +325,12 @@ function getAIMoveMedium(aiState: AIState): Position {
   return choice;
 }
 
-export function getAIMove(aiState: AIState, difficulty: Difficulty = 'medium', board?: CellState[][]): Position {
+export function getAIMove(aiState: AIState, difficulty: Difficulty = 'medium', board?: CellState[][], shipConfigs?: ShipConfig[]): Position {
   switch (difficulty) {
     case 'easy':
       return getAIMoveEasy(aiState);
     case 'hard':
-      return getAIMoveHard(aiState, board || createEmptyBoard());
+      return getAIMoveHard(aiState, board || createEmptyBoard(), shipConfigs);
     case 'medium':
     default:
       return getAIMoveMedium(aiState);
@@ -361,14 +361,15 @@ export function updateAIAfterAttack(
   }
 }
 
-export function placeShipsRandomly(): {
+export function placeShipsRandomly(shipConfigs?: ShipConfig[]): {
   board: CellState[][];
   ships: Ship[];
 } {
   let board = createEmptyBoard();
   const ships: Ship[] = [];
+  const configs = shipConfigs || SHIP_CONFIGS;
 
-  for (const config of SHIP_CONFIGS) {
+  for (const config of configs) {
     let placed = false;
     let attempts = 0;
     while (!placed && attempts < 1000) {
