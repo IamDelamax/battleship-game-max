@@ -30,6 +30,26 @@ export function canPlaceShip(
     const c = orientation === 'horizontal' ? col + i : col;
     if (r >= BOARD_SIZE || c >= BOARD_SIZE) return false;
     if (board[r][c] !== 'empty') return false;
+
+    // Check all 8 neighbors for adjacent ships (enforce spacing)
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        if (dr === 0 && dc === 0) continue;
+        const nr = r + dr;
+        const nc = c + dc;
+        if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE) {
+          if (board[nr][nc] === 'ship') {
+            // Allow if the neighbor is part of the same ship being placed
+            const isPartOfCurrentShip = Array.from({ length: size }).some((_, j) => {
+              const sr = orientation === 'vertical' ? row + j : row;
+              const sc = orientation === 'horizontal' ? col + j : col;
+              return sr === nr && sc === nc;
+            });
+            if (!isPartOfCurrentShip) return false;
+          }
+        }
+      }
+    }
   }
   return true;
 }
@@ -80,7 +100,7 @@ export function processAttack(
   ships: Ship[],
   row: number,
   col: number
-): { newBoard: CellState[][]; result: 'hit' | 'miss' | 'sunk'; sunkShipId?: string } {
+): { newBoard: CellState[][]; newShips: Ship[]; result: 'hit' | 'miss' | 'sunk'; sunkShipId?: string } {
   const newBoard = board.map((r) => [...r]);
   const cell = newBoard[row][col];
 
@@ -88,26 +108,34 @@ export function processAttack(
     const key = posKey({ row, col });
     let sunkShipId: string | undefined;
 
-    for (const ship of ships) {
+    const newShips = ships.map((ship) => {
       const isOnShip = ship.positions.some((p) => p.row === row && p.col === col);
       if (isOnShip) {
-        ship.hits.add(key);
-        if (isShipSunk(ship)) {
-          for (const pos of ship.positions) {
-            newBoard[pos.row][pos.col] = 'sunk';
-          }
-          sunkShipId = ship.id;
-          return { newBoard, result: 'sunk', sunkShipId };
-        }
-        break;
+        const updatedHits = new Set(ship.hits);
+        updatedHits.add(key);
+        return { ...ship, hits: updatedHits };
       }
+      return ship;
+    });
+
+    const hitShip = newShips.find((ship) =>
+      ship.positions.some((p) => p.row === row && p.col === col)
+    );
+
+    if (hitShip && isShipSunk(hitShip)) {
+      for (const pos of hitShip.positions) {
+        newBoard[pos.row][pos.col] = 'sunk';
+      }
+      sunkShipId = hitShip.id;
+      return { newBoard, newShips, result: 'sunk', sunkShipId };
     }
+
     newBoard[row][col] = 'hit';
-    return { newBoard, result: 'hit' };
+    return { newBoard, newShips, result: 'hit' };
   }
 
   newBoard[row][col] = 'miss';
-  return { newBoard, result: 'miss' };
+  return { newBoard, newShips: ships, result: 'miss' };
 }
 
 // AI Logic
@@ -179,7 +207,8 @@ export function getAIMove(aiState: AIState): Position {
 export function updateAIAfterAttack(
   aiState: AIState,
   pos: Position,
-  result: 'hit' | 'miss' | 'sunk'
+  result: 'hit' | 'miss' | 'sunk',
+  sunkShipPositions?: Position[]
 ): void {
   if (result === 'hit') {
     aiState.mode = 'target';
@@ -191,11 +220,30 @@ export function updateAIAfterAttack(
       }
     }
   } else if (result === 'sunk') {
-    // Clear target queue related to the sunk ship and reset to hunt
-    aiState.hitPositions = [];
-    aiState.targetQueue = [];
-    if (aiState.targetQueue.length === 0) {
+    // Remove only the sunk ship's positions from hitPositions
+    const sunkKeys = new Set(
+      (sunkShipPositions ?? []).map((p) => posKey(p))
+    );
+    aiState.hitPositions = aiState.hitPositions.filter(
+      (p) => !sunkKeys.has(posKey(p))
+    );
+
+    // If there are remaining hits from other ships, stay in target mode
+    if (aiState.hitPositions.length > 0) {
+      aiState.mode = 'target';
+      // Rebuild target queue from remaining hit positions
+      aiState.targetQueue = [];
+      for (const hit of aiState.hitPositions) {
+        const adjacent = getAdjacentCells(hit);
+        for (const adj of adjacent) {
+          if (!aiState.triedPositions.has(posKey(adj))) {
+            aiState.targetQueue.push(adj);
+          }
+        }
+      }
+    } else {
       aiState.mode = 'hunt';
+      aiState.targetQueue = [];
     }
   }
 }

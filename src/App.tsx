@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   CellState,
   Orientation,
@@ -42,8 +42,25 @@ function App() {
   const [hoverValid, setHoverValid] = useState(false);
   const [lastHit, setLastHit] = useState<Position | null>(null);
   const aiStateRef = useRef<AIStateType>(createAIState());
+  const playerBoardRef = useRef(playerBoard);
+  const playerShipsRef = useRef(playerShips);
+
+  // Keep refs in sync with state for use in setTimeout callbacks
+  useEffect(() => { playerBoardRef.current = playerBoard; }, [playerBoard]);
+  useEffect(() => { playerShipsRef.current = playerShips; }, [playerShips]);
 
   const currentShipConfig: ShipConfig | undefined = SHIP_CONFIGS[currentShipIndex];
+
+  // Keyboard shortcut: press 'R' to rotate ship during placement
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (gamePhase === 'placement' && (e.key === 'r' || e.key === 'R')) {
+        setOrientation((o) => (o === 'horizontal' ? 'vertical' : 'horizontal'));
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [gamePhase]);
 
   const handlePlacementClick = useCallback(
     (row: number, col: number) => {
@@ -101,17 +118,18 @@ function App() {
       const cell = enemyBoard[row][col];
       if (cell === 'hit' || cell === 'miss' || cell === 'sunk') return;
 
-      const { newBoard, result, sunkShipId } = processAttack(
+      const { newBoard, newShips: updatedEnemyShips, result, sunkShipId } = processAttack(
         enemyBoard,
         enemyShips,
         row,
         col
       );
       setEnemyBoard(newBoard);
+      setEnemyShips(updatedEnemyShips);
       setLastHit({ row, col });
 
       if (result === 'sunk') {
-        const sunkShip = enemyShips.find((s) => s.id === sunkShipId);
+        const sunkShip = updatedEnemyShips.find((s) => s.id === sunkShipId);
         setMessage(`You sunk the enemy's ${sunkShip?.name}!`);
       } else if (result === 'hit') {
         setMessage('Hit!');
@@ -119,7 +137,7 @@ function App() {
         setMessage('Miss!');
       }
 
-      if (allShipsSunk(enemyShips)) {
+      if (allShipsSunk(updatedEnemyShips)) {
         setGamePhase('gameOver');
         setWinner('player');
         setMessage('You win! All enemy ships have been sunk!');
@@ -128,20 +146,26 @@ function App() {
 
       setIsPlayerTurn(false);
 
-      // AI turn after a delay
+      // AI turn after a delay — use refs to read latest state
       setTimeout(() => {
         const aiMove = getAIMove(aiStateRef.current);
         const {
           newBoard: aiNewBoard,
+          newShips: updatedPlayerShips,
           result: aiResult,
           sunkShipId: aiSunkShipId,
-        } = processAttack(playerBoard, playerShips, aiMove.row, aiMove.col);
+        } = processAttack(playerBoardRef.current, playerShipsRef.current, aiMove.row, aiMove.col);
 
-        updateAIAfterAttack(aiStateRef.current, aiMove, aiResult);
+        const sunkShip = aiResult === 'sunk'
+          ? updatedPlayerShips.find((s) => s.id === aiSunkShipId)
+          : undefined;
+        const sunkPositions = sunkShip ? sunkShip.positions : undefined;
+
+        updateAIAfterAttack(aiStateRef.current, aiMove, aiResult, sunkPositions);
         setPlayerBoard(aiNewBoard);
+        setPlayerShips(updatedPlayerShips);
 
         if (aiResult === 'sunk') {
-          const sunkShip = playerShips.find((s) => s.id === aiSunkShipId);
           setMessage(`AI sunk your ${sunkShip?.name}! Your turn.`);
         } else if (aiResult === 'hit') {
           setMessage('AI hit one of your ships! Your turn.');
@@ -149,17 +173,16 @@ function App() {
           setMessage('AI missed! Your turn.');
         }
 
-        if (allShipsSunk(playerShips)) {
+        if (allShipsSunk(updatedPlayerShips)) {
           setGamePhase('gameOver');
           setWinner('ai');
           setMessage('Game Over! The AI sunk all your ships!');
-          return;
+        } else {
+          setIsPlayerTurn(true);
         }
-
-        setIsPlayerTurn(true);
       }, 600);
     },
-    [gamePhase, isPlayerTurn, enemyBoard, enemyShips, playerBoard, playerShips]
+    [gamePhase, isPlayerTurn, enemyBoard, enemyShips]
   );
 
   const handlePlayAgain = useCallback(() => {
@@ -389,7 +412,7 @@ function App() {
             className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-semibold 
               transition-colors border border-cyan-500/50 shadow-lg shadow-cyan-900/30"
           >
-            Orientation: {orientation === 'horizontal' ? '→ Horizontal' : '↓ Vertical'}
+            Orientation: {orientation === 'horizontal' ? '→ Horizontal' : '↓ Vertical'} (R)
           </button>
           <button
             onClick={handleRandomPlacement}
